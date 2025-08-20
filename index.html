@@ -1,0 +1,30 @@
+﻿<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FitGame Prototype</title>
+    <style>
+      body { margin:0; font-family:system-ui,Segoe UI,Arial; background:#111; color:#eee; }
+      .topbar{display:flex;gap:12px;align-items:center;padding:10px;background:#1b1b1b;position:sticky;top:0;z-index:2}
+      .btn{background:#2a2a2a;border:1px solid #3a3a3a;padding:8px 12px;border-radius:8px;cursor:pointer}
+      .btn:active{transform:translateY(1px)}
+      #hp { font-weight:600; }
+      #canvas-wrap{display:flex;justify-content:center;padding:8px}
+      input[type=file]{display:none}
+      label[for=file]{cursor:pointer}
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <span id="hp">HP: —</span>
+      <button id="restart" class="btn">Обновить сессию</button>
+      <label class="btn" for="file">Загрузить файл параметров</label>
+      <input id="file" type="file" accept="application/json" />
+      <span id="ability">Абилка: 1</span>
+      <span id="weapon">Оружие: 1</span>
+    </div>
+    <div id="canvas-wrap"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
