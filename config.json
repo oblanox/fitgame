@@ -2,9 +2,13 @@
   "field": {
     "bg": "#F9EDD6",
     "line": "#B0846A",
-    "rows": 5,
-    "widthRatio": 0.70,
-    "padding": { "left": 80, "right": 40, "top": 40, "bottom": 120 }
+    "rows": 4,
+    "widthRatio": 0.35,
+    "padding": { "left": 80, "right": 40, "top": 40, "bottom": 120 },
+    "lineInsetTop": 14,
+    "lineInsetBottom": 80,
+    "lineThickness": 1,
+    "lineStep": 68
   },
 
   "player": {
@@ -14,39 +18,116 @@
     "def": 8,
     "attack": { "min": 12, "max": 16 },
     "luck": 8,
-    "elements": { "green": 0.84, "fire": 0.44, "cold": 0.31, "cosmos": 0.17 }
+    "elements": { "earth": 0.84, "fire": 0.44, "water": 0.31, "cosmos": 0.17 }
   },
 
   "boss": {
     "type": 1,
-    "element": "green",
+    "element": "earth",
     "hp": 88,
     "atk": 28,
     "row": 4,
-    "col": 0.50,
-    "radius": 62
+    "col": 0.5,
+    "radius": 80,
+    "lineOffset": 10
   },
-
   "minions": [
-    { "id": 1, "type": 1, "element": "green",  "hp": 55, "atk": 15, "row": 4, "col": 0.18, "radius": 26 },
-    { "id": 2, "type": 1, "element": "green",  "hp": 33, "atk": 13, "row": 2, "col": 0.28, "radius": 26 },
-    { "id": 3, "type": 1, "element": "fire",   "hp": 36, "atk": 16, "row": 2, "col": 0.50, "radius": 26 },
-    { "id": 4, "type": 1, "element": "cold",   "hp": 27, "atk": 17, "row": 2, "col": 0.72, "radius": 26 },
-    { "id": 5, "type": 1, "element": "cosmos", "hp": 14, "atk": 24, "row": 4, "col": 0.86, "radius": 26 }
+    {
+      "id": 1,
+      "type": 1,
+      "element": "earth",
+      "hp": 55,
+      "atk": 15,
+      "row": 3,
+      "col": 0.12,
+      "radius": 36,
+      "lineOffset": 4
+    },
+    {
+      "id": 2,
+      "type": 1,
+      "element": "earth",
+      "hp": 33,
+      "atk": 13,
+      "row": 2,
+      "col": 0.28,
+      "radius": 36,
+      "lineOffset": 0
+    },
+    {
+      "id": 3,
+      "type": 1,
+      "element": "fire",
+      "hp": 36,
+      "atk": 16,
+      "row": 1,
+      "col": 0.5,
+      "radius": 36,
+      "lineOffset": -28
+    },
+    {
+      "id": 4,
+      "type": 1,
+      "element": "water",
+      "hp": 27,
+      "atk": 17,
+      "row": 2,
+      "col": 0.72,
+      "radius": 36,
+      "lineOffset": 0
+    },
+    {
+      "id": 5,
+      "type": 1,
+      "element": "cosmos",
+      "hp": 14,
+      "atk": 24,
+      "row": 3,
+      "col": 0.86,
+      "radius": 36,
+      "lineOffset": 4
+    }
   ],
 
   "weapons": [
-    { "id": 1, "name": "Type 1", "miss": { "baseByPos": [0,0,0,0], "luckStep": 10, "luckPerStepPct": 1 }, "retaliationRule": "t1" },
-    { "id": 2, "name": "Type 2", "miss": { "baseByPos": [15,30,45,60], "luckStep": 10, "luckPerStepPct": 1 }, "retaliationRule": "t2" },
-    { "id": 3, "name": "Type 3", "miss": { "baseByPos": [25,50,75,100], "luckStep": 10, "luckPerStepPct": 1 }, "retaliationRule": "t3" }
+    {
+      "id": 1,
+      "name": "Type 1",
+      "miss": {
+        "baseByPos": [0, 0, 0, 0],
+        "luckStep": 10,
+        "luckPerStepPct": 1
+      },
+      "retaliationRule": "t1"
+    },
+    {
+      "id": 2,
+      "name": "Type 2",
+      "miss": {
+        "baseByPos": [15, 30, 45, 60],
+        "luckStep": 10,
+        "luckPerStepPct": 1
+      },
+      "retaliationRule": "t2"
+    },
+    {
+      "id": 3,
+      "name": "Type 3",
+      "miss": {
+        "baseByPos": [25, 50, 75, 100],
+        "luckStep": 10,
+        "luckPerStepPct": 1
+      },
+      "retaliationRule": "t3"
+    }
   ],
 
   "elementMatrix": {
-    "green":  { "green": 1.0, "fire": 0.8, "cold": 1.2, "cosmos": 1.0 },
-    "fire":   { "green": 1.2, "fire": 1.0, "cold": 0.8, "cosmos": 1.0 },
-    "cold":   { "green": 0.8, "fire": 1.2, "cold": 1.0, "cosmos": 1.0 },
-    "cosmos": { "green": 1.0, "fire": 1.0, "cold": 1.0, "cosmos": 1.0 }
+    "earth": { "earth": 1.0, "fire": 0.8, "water": 1.2, "cosmos": 1.0 },
+    "fire": { "earth": 1.2, "fire": 1.0, "water": 0.8, "cosmos": 1.0 },
+    "water": { "earth": 0.8, "fire": 1.2, "water": 1.0, "cosmos": 1.0 },
+    "cosmos": { "earth": 1.0, "fire": 1.0, "water": 1.0, "cosmos": 1.0 }
   },
 
-  "timer": { "turns": 10, "regen": { "minionPct": 0.10, "bossPct": 0.10 } }
+  "timer": { "turns": 10, "regen": { "minionPct": 0.1, "bossPct": 0.1 } }
 }
