@@ -459,7 +459,8 @@ const sketch = (s: p5) => {
         hpMax: cfg.player.hpMax,
       });
 
-      barY = barY + 60; // чуть ниже полоски HP
+      barY = barY + 60;
+      const weaponY = barY; // чуть ниже полоски HP
       //const weaponW = Math.floor(fieldW * 0.7);
       //const weaponX = fieldX + (fieldW - weaponW) / 2;
       drawWeaponPanel(
@@ -501,6 +502,7 @@ const sketch = (s: p5) => {
     // ===== Обработка клика по оружию =====
     const id = handleWeaponClick(s.mouseX, s.mouseY);
     if (id !== null) {
+      drawSelectedWeaponIcon(s, fieldX, weapon);
       console.log("Выбрано оружие с ID:", id);
       return; // Не передаём клик дальше
     }
@@ -543,22 +545,43 @@ const sketch = (s: p5) => {
   });
 })();
 
-function selectedweaponId(s: p5, id: number) {
-  const selectedWeapon =
-    cfg?.weapons?.find((w) => w.id === id) ?? cfg?.weapons?.[0];
-  if (selectedWeapon) {
-    const iconPath = `assets/icon_weapon_selected_${selectedWeapon.id}.png`; // или по kind
-    const icon = s.loadImage(iconPath); // или можно заранее загрузить один раз
+function drawSelectedWeaponIcon(
+  p: p5,
+  x: number,
+  y: number,
+  selectedWeaponId: number,
+  size = 64
+) {
+  if (!cfg?.weapons || !cfg.weapons.length) return;
 
-    const x = fieldX + 240;
-    const y = hudY;
-    const size = 64;
+  const weapon =
+    cfg.weapons.find((w) => w.id === selectedWeaponId) ?? cfg.weapons[0];
+  if (!weapon) return;
 
-    s.image(icon, x, y, size, size);
+  const iconPath = `assets/icon_weapon_selected_${weapon.id}.png`;
+  const img = p.loadImage(iconPath); // 👈 или кэшируй отдельно, если надо
 
-    const [minDmg, maxDmg] = getBaseDamageRange(selectedWeapon);
-    s.textSize(14);
-    s.fill(0);
-    s.text(`Урон: ${minDmg} – ${maxDmg}`, x + size + 10, y + size / 2);
+  // Плавающая иконка (лёгкая анимация)
+  const dy = Math.sin(p.frameCount / 10) * 1.5;
+  p.image(img, x, y + dy, size, size);
+
+  // Урон
+  const [minDmg, maxDmg] = getBaseDamageRange(weapon);
+  p.fill(0);
+  p.textSize(14);
+  p.textAlign(p.LEFT, p.TOP);
+  p.text(`Урон: ${minDmg} – ${maxDmg}`, x + size + 10, y + size / 2 - 8);
+}
+
+function getBaseDamageRange(w: any): [number, number] {
+  switch (w.retaliationRule) {
+    case "t1":
+      return [12, 20];
+    case "t2":
+      return [18, 30];
+    case "t3":
+      return [24, 42];
+    default:
+      return [10, 16];
   }
 }
