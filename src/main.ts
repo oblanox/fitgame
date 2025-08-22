@@ -1,5 +1,19 @@
 ﻿import p5 from "p5";
-import { drawPlayerHpBar } from "./ui/interface";
+import { drawHpStatus } from "./ui/hp_status";
+import {
+  drawWeaponPanel,
+  handleWeaponClick,
+  getSelectedWeapon,
+  preloadWeaponIcons,
+  Weapon,
+  getWeapons,
+} from "./ui/weapons";
+import {
+  drawElementPanel,
+  handleElementClick,
+  getSelectedElement,
+} from "./ui/elements";
+import { drawPanelBg } from "@ui/common";
 
 /* ──────────────────────────────────────────────────────────────────────────────
   СТИХИИ И ВСПОМОГАТЕЛЬНОЕ
@@ -55,7 +69,7 @@ type FieldCfg = {
   lineStep?: number; // ЯВНЫЙ шаг между линиями (px). Если не влезает — урежем.
 };
 
-type PlayerCfg = { hpMax: number; hp: number; hits: number };
+type PlayerCfg = { hpMax: number; hp: number; hits: number; luck: number };
 
 type BossCfg = {
   type: number;
@@ -80,11 +94,23 @@ type MinionCfg = {
   lineOffset?: number; // индивидуальный вертикальный сдвиг от линии
 };
 
+type WeaponCfg = {
+  id: number;
+  name: string;
+  miss: {
+    baseByPos: number[]; // [0, 0, 0, 0] или [15, 30, 45, 60] — массив из 4 чисел
+    luckStep: number;
+    luckPerStepPct: number;
+  };
+  retaliationRule: "t1" | "t2" | "t3";
+};
+
 type Cfg = {
   field?: FieldCfg;
   player: PlayerCfg;
   boss: BossCfg;
   minions: MinionCfg[];
+  weapons: WeaponCfg[];
 };
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -140,7 +166,7 @@ async function loadConfig(url = "/config.json") {
         lineThickness: 3,
         lineStep: 68,
       },
-      player: { hpMax: 2200, hp: 2200, hits: 60 },
+      player: { hpMax: 2200, hp: 2200, hits: 60, luck: 1 },
       boss: {
         type: 1,
         element: "earth",
@@ -152,6 +178,7 @@ async function loadConfig(url = "/config.json") {
         lineOffset: 10,
       },
       minions: [],
+      weapons: [],
     };
   }
   normalizeConfig();
@@ -357,7 +384,7 @@ function drawEnemyBadge(s: p5, e: Enemy) {
 ────────────────────────────────────────────────────────────────────────────── */
 const sketch = (s: p5) => {
   const W = 960,
-    H = 540;
+    H = 810;
   let t = 0;
   let hoveredId: number | null = null;
 
@@ -365,6 +392,7 @@ const sketch = (s: p5) => {
     const c = s.createCanvas(W, H);
     c.parent("canvas-wrap");
     s.frameRate(60);
+    preloadWeaponIcons(s);
   };
 
   s.draw = () => {
@@ -388,7 +416,7 @@ const sketch = (s: p5) => {
     // фон поля
     s.noStroke();
     s.fill(cfg.field!.bg!);
-    s.rect(fieldX, fieldY, fieldW, fieldH, 10);
+    s.rect(fieldX, fieldY, fieldW, fieldH, 0);
 
     // горизонтальные линии + цифры слева
     s.stroke(cfg.field!.line!);
@@ -420,24 +448,40 @@ const sketch = (s: p5) => {
 
       // подписи HP/ATK
       drawEnemyBadge(s, e);
-      (window as any).__fieldRect = { fieldX, fieldY, fieldW, fieldH };
-      drawPlayerHpBar(s, cfg);
+
+      const { fieldX, fieldY, fieldW, fieldH } = getFieldRect();
+
+      let barY = fieldY + fieldH;
+      drawPanelBg(s, fieldX, barY, fieldW, 250, cfg.field?.bg);
+
+      drawHpStatus(s, fieldX, barY, fieldW, {
+        hp: cfg.player.hp,
+        hpMax: cfg.player.hpMax,
+      });
+
+      barY = barY + 60; // чуть ниже полоски HP
+      //const weaponW = Math.floor(fieldW * 0.7);
+      //const weaponX = fieldX + (fieldW - weaponW) / 2;
+      drawWeaponPanel(
+        s,
+        {
+          weapons: getWeapons(cfg),
+          selectedId: getSelectedWeapon()?.id ?? 1,
+        },
+        {
+          x: fieldX + 12,
+          y: barY,
+        }
+      );
+
+      barY += +60;
+      drawElementPanel(s, {
+        x: fieldX + 12,
+        y: barY,
+        size: 42,
+        gap: 16,
+      });
     }
-
-    // полоса HP игрока (оранжевая линия внизу)
-    s.noFill();
-    s.stroke("#ff9900");
-    s.strokeWeight(6);
-    const hpPct = Math.max(0, Math.min(1, playerHp / cfg.player.hpMax));
-    s.line(40, H - 40, 40 + hpPct * (W - 80), H - 40);
-
-    // болтающееся «оружие» — чисто для визуального оживления
-    s.noStroke();
-    s.fill("#ddd");
-    const ox = 40 + Math.sin(t) * 6,
-      oy = H - 80 + Math.cos(t * 0.7) * 4;
-    s.rect(ox, oy, 24, 8, 4);
-    t += 0.08;
   };
 
   // наведение мыши — для подсветки круга
@@ -454,6 +498,18 @@ const sketch = (s: p5) => {
 
   // будущая точка входа для «атаки по клику»
   s.mousePressed = () => {
+    // ===== Обработка клика по оружию =====
+    const id = handleWeaponClick(s.mouseX, s.mouseY);
+    if (id !== null) {
+      console.log("Выбрано оружие с ID:", id);
+      return; // Не передаём клик дальше
+    }
+    const clickedEl = handleElementClick(s.mouseX, s.mouseY);
+    if (clickedEl) {
+      console.log("Выбрана стихия:", clickedEl);
+      return;
+    }
+    //weaponClick(s.mouseX, s.mouseY, cfg);
     if (!hoveredId) return;
     // TODO: здесь будет логика удара по цели hoveredId
   };
@@ -486,3 +542,23 @@ const sketch = (s: p5) => {
     });
   });
 })();
+
+function selectedweaponId(s: p5, id: number) {
+  const selectedWeapon =
+    cfg?.weapons?.find((w) => w.id === id) ?? cfg?.weapons?.[0];
+  if (selectedWeapon) {
+    const iconPath = `assets/icon_weapon_selected_${selectedWeapon.id}.png`; // или по kind
+    const icon = s.loadImage(iconPath); // или можно заранее загрузить один раз
+
+    const x = fieldX + 240;
+    const y = hudY;
+    const size = 64;
+
+    s.image(icon, x, y, size, size);
+
+    const [minDmg, maxDmg] = getBaseDamageRange(selectedWeapon);
+    s.textSize(14);
+    s.fill(0);
+    s.text(`Урон: ${minDmg} – ${maxDmg}`, x + size + 10, y + size / 2);
+  }
+}
