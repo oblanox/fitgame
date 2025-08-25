@@ -123,10 +123,30 @@
   ],
 
   "elementMatrix": {
-    "earth": { "earth": 1.0, "fire": 0.8, "water": 1.2, "cosmos": 1.0 },
-    "fire": { "earth": 1.2, "fire": 1.0, "water": 0.8, "cosmos": 1.0 },
-    "water": { "earth": 0.8, "fire": 1.2, "water": 1.0, "cosmos": 1.0 },
-    "cosmos": { "earth": 1.0, "fire": 1.0, "water": 1.0, "cosmos": 1.0 }
+    "earth": {
+      "earth": 1.0,
+      "fire": 0.5,
+      "water": 0.3,
+      "cosmos": 0.2
+    },
+    "fire": {
+      "earth": 2.0,
+      "fire": 1.0,
+      "water": 0.5,
+      "cosmos": 0.3
+    },
+    "water": {
+      "earth": 4.0,
+      "fire": 2.0,
+      "water": 1.0,
+      "cosmos": 0.5
+    },
+    "cosmos": {
+      "earth": 8.0,
+      "fire": 4.0,
+      "water": 2.0,
+      "cosmos": 1.0
+    }
   },
 
   "timer": { "turns": 10, "regen": { "minionPct": 0.1, "bossPct": 0.1 } }

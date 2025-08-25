@@ -9,11 +9,20 @@ import {
   getWeapons,
 } from "./ui/weapons";
 import {
-  drawElementPanel,
-  handleElementClick,
-  getSelectedElement,
+  drawPointAbilityPanel,
+  handlePointAbilityClick,
+  getActiveElementFromPointAbility,
+  setSelectedPointAbility,
 } from "./ui/elements";
 import { drawPanelBg } from "@ui/common";
+import { drawPlayerStats } from "./ui/player_stats";
+import { drawElementSchema, preloadElementSchema } from "@ui/element_schemes";
+import {
+  drawAbilityPanel,
+  handleAbilityClick,
+  getSelectedAbility,
+  setSelectedAbility
+} from "./ui/abilities";
 
 /* ──────────────────────────────────────────────────────────────────────────────
   СТИХИИ И ВСПОМОГАТЕЛЬНОЕ
@@ -23,6 +32,7 @@ import { drawPanelBg } from "@ui/common";
     (понимает новые earth/water .
 ────────────────────────────────────────────────────────────────────────────── */
 type ElementKey = "earth" | "fire" | "water" | "cosmos";
+type AttackKey = "min" | "max";
 
 const ELEMENT_COLOR: Record<ElementKey, string> = {
   earth: "#129447", // зелёный — земля
@@ -69,7 +79,16 @@ type FieldCfg = {
   lineStep?: number; // ЯВНЫЙ шаг между линиями (px). Если не влезает — урежем.
 };
 
-type PlayerCfg = { hpMax: number; hp: number; hits: number; luck: number };
+type PlayerCfg = {
+  hpMax: number;
+  hp: number;
+  hits: number;
+  luck: number;
+  def: number;
+  maxHits: number;
+  elements?: Partial<Record<ElementKey, number>>;
+  attack: Record<AttackKey, number>;
+};
 
 type BossCfg = {
   type: number;
@@ -105,12 +124,22 @@ type WeaponCfg = {
   retaliationRule: "t1" | "t2" | "t3";
 };
 
+type ElementMatrixCfg = Record<ElementKey, Record<ElementKey, number>>;
+
+const defaultElementMatrix: ElementMatrixCfg = {
+  earth: { earth: 1, fire: 1, water: 1, cosmos: 1 },
+  fire: { earth: 1, fire: 1, water: 1, cosmos: 1 },
+  water: { earth: 1, fire: 1, water: 1, cosmos: 1 },
+  cosmos: { earth: 1, fire: 1, water: 1, cosmos: 1 },
+};
+
 type Cfg = {
   field?: FieldCfg;
   player: PlayerCfg;
   boss: BossCfg;
   minions: MinionCfg[];
   weapons: WeaponCfg[];
+  elementMatrix?: ElementMatrixCfg;
 };
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -119,6 +148,8 @@ type Cfg = {
   - enemies: подготовленные к рендеру сущности (миньоны + босс).
 ────────────────────────────────────────────────────────────────────────────── */
 let cfg: Cfg | null = null;
+
+let selectedWeaponId: number = 1;
 
 const abilityIdx = 1; // пока просто выводим в шапке
 const weaponIdx = 1;
@@ -166,7 +197,24 @@ async function loadConfig(url = "/config.json") {
         lineThickness: 3,
         lineStep: 68,
       },
-      player: { hpMax: 2200, hp: 2200, hits: 60, luck: 1 },
+      player: {
+        hpMax: 2200,
+        hp: 2200,
+        hits: 60,
+        luck: 1,
+        def: 1,
+        maxHits: 60,
+        attack: {
+          min: 1,
+          max: 10,
+        },
+        elements: {
+          earth: 0.25,
+          fire: 0.25,
+          water: 0.25,
+          cosmos: 0.25,
+        },
+      },
       boss: {
         type: 1,
         element: "earth",
@@ -179,6 +227,12 @@ async function loadConfig(url = "/config.json") {
       },
       minions: [],
       weapons: [],
+      elementMatrix: {
+        earth: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0 },
+        fire: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0 },
+        water: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0 },
+        cosmos: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0 },
+      },
     };
   }
   normalizeConfig();
@@ -382,17 +436,27 @@ function drawEnemyBadge(s: p5, e: Enemy) {
   - рисуем HP‑линию игрока внизу;
   - лёгкая «болтанка» оружия как плейсхолдер.
 ────────────────────────────────────────────────────────────────────────────── */
+const selectedIcons: Record<number, p5.Image> = {};
+
 const sketch = (s: p5) => {
   const W = 960,
-    H = 810;
+    H = 1400;
   let t = 0;
   let hoveredId: number | null = null;
+
+  function preloadWeaponSelected(p: p5) {
+    selectedIcons[1] = p.loadImage("assets/icon_weapon_selected_1.png");
+    selectedIcons[2] = p.loadImage("assets/icon_weapon_selected_2.png");
+    selectedIcons[3] = p.loadImage("assets/icon_weapon_selected_3.png");
+  }
 
   s.setup = () => {
     const c = s.createCanvas(W, H);
     c.parent("canvas-wrap");
     s.frameRate(60);
     preloadWeaponIcons(s);
+    preloadWeaponSelected(s);
+    preloadElementSchema(s);
   };
 
   s.draw = () => {
@@ -448,40 +512,75 @@ const sketch = (s: p5) => {
 
       // подписи HP/ATK
       drawEnemyBadge(s, e);
+    }
 
-      const { fieldX, fieldY, fieldW, fieldH } = getFieldRect();
+    let barY = fieldH;
+    const weaponY = barY;
+    drawPanelBg(s, fieldX, barY, fieldW, 750, cfg.field?.bg);
 
-      let barY = fieldY + fieldH;
-      drawPanelBg(s, fieldX, barY, fieldW, 250, cfg.field?.bg);
+    drawHpStatus(s, fieldX, barY, fieldW, {
+      hp: cfg.player.hp,
+      hpMax: cfg.player.hpMax,
+    });
 
-      drawHpStatus(s, fieldX, barY, fieldW, {
-        hp: cfg.player.hp,
-        hpMax: cfg.player.hpMax,
-      });
-
-      barY = barY + 60;
-      const weaponY = barY; // чуть ниже полоски HP
-      //const weaponW = Math.floor(fieldW * 0.7);
-      //const weaponX = fieldX + (fieldW - weaponW) / 2;
-      drawWeaponPanel(
-        s,
-        {
-          weapons: getWeapons(cfg),
-          selectedId: getSelectedWeapon()?.id ?? 1,
-        },
-        {
-          x: fieldX + 12,
-          y: barY,
-        }
-      );
-
-      barY += +60;
-      drawElementPanel(s, {
+    barY = barY + 60;
+    // чуть ниже полоски HP
+    //const weaponW = Math.floor(fieldW * 0.7);
+    //const weaponX = fieldX + (fieldW - weaponW) / 2;
+    drawWeaponPanel(
+      s,
+      {
+        weapons: getWeapons(cfg),
+        selectedId: getSelectedWeapon()?.id ?? 1,
+      },
+      {
         x: fieldX + 12,
         y: barY,
-        size: 42,
-        gap: 16,
-      });
+      }
+    );
+    drawSelectedWeaponIcon(s, fieldX, weaponY);
+    barY += 60;
+
+    const rule = getSelectedWeaponCfg()?.retaliationRule ?? "t1";
+    const weaponImg = selectedIcons[getSelectedWeaponCfg()?.id ?? 1];
+    drawAbilityPanel(s, fieldX, barY, fieldW, {
+      rule,
+      weaponTile: {
+        img: weaponImg,
+        min: cfg.player.attack.min,
+        max: cfg.player.attack.max,
+      },
+    });
+    barY += 90;
+
+    drawPointAbilityPanel(s, {
+      x: fieldX,
+      y: barY,
+      w: fieldW,
+      playerElements: cfg.player.elements,
+    });
+    barY += 80;
+
+    barY += 80;
+
+    drawPlayerStats(
+      s,
+      fieldX,
+      barY,
+      fieldW,
+      hitsLeft,
+      cfg.player.hits,
+      cfg.player.hp,
+      cfg.player.hpMax,
+      cfg.player.attack.min,
+      cfg.player.attack.max,
+      cfg.player.def ?? 0,
+      cfg.player.luck ?? 0
+    );
+
+    barY += 130;
+    if (cfg.elementMatrix) {
+      drawElementSchema(s, fieldX, barY, fieldW, cfg.elementMatrix);
     }
   };
 
@@ -498,22 +597,47 @@ const sketch = (s: p5) => {
   };
 
   // будущая точка входа для «атаки по клику»
+  // будущая точка входа для «атаки по клику»
   s.mousePressed = () => {
-    // ===== Обработка клика по оружию =====
-    const id = handleWeaponClick(s.mouseX, s.mouseY);
-    if (id !== null) {
-      drawSelectedWeaponIcon(s, fieldX, weapon);
-      console.log("Выбрано оружие с ID:", id);
-      return; // Не передаём клик дальше
+    // 1) Панель оружия
+    const pickedWeaponId = handleWeaponClick(s.mouseX, s.mouseY);
+    if (pickedWeaponId !== null) {
+      selectedWeaponId = pickedWeaponId;
+      console.log("Выбрано оружие с ID:", pickedWeaponId);
+      return; // стопим дальнейшую обработку
     }
-    const clickedEl = handleElementClick(s.mouseX, s.mouseY);
-    if (clickedEl) {
-      console.log("Выбрана стихия:", clickedEl);
+
+    // 2) точечный удар
+    const pickedPoint = handlePointAbilityClick(s.mouseX, s.mouseY);
+    if (pickedPoint) {
+      setSelectedAbility(null); // сброс суперудара
+      console.log("Точечный удар:", pickedPoint);
       return;
     }
-    //weaponClick(s.mouseX, s.mouseY, cfg);
+
+    // 3) суперудары
+    const pickedSuper = handleAbilityClick(s.mouseX, s.mouseY);
+    if (pickedSuper) {
+      console.log("Суперудар:", pickedSuper);
+      return;
+    }
+
+    // 4) Клик по врагу → подробный расчёт урона (лог “статический” + “итог клика”)
     if (!hoveredId) return;
-    // TODO: здесь будет логика удара по цели hoveredId
+
+    const enemy = enemies.find((e) => e.id === hoveredId);
+    if (!enemy || !cfg) return;
+
+    // берём текущее оружие из конфига по selectedWeaponId
+    const weapon = getSelectedWeaponCfg() ?? cfg.weapons?.[0] ?? null;
+    if (!weapon) return;
+
+    DebugStatsPlayerDamageAgainstEnemy(
+      cfg.player,
+      weapon,
+      enemy,
+      cfg.elementMatrix ?? defaultElementMatrix
+    );
   };
 };
 
@@ -545,43 +669,228 @@ const sketch = (s: p5) => {
   });
 })();
 
-function drawSelectedWeaponIcon(
-  p: p5,
-  x: number,
-  y: number,
-  selectedWeaponId: number,
-  size = 64
-) {
+function getSelectedWeaponCfg(): WeaponCfg | null {
+  if (!cfg?.weapons) return null;
+  return cfg.weapons.find((w) => w.id === selectedWeaponId) ?? null;
+}
+
+function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
   if (!cfg?.weapons || !cfg.weapons.length) return;
 
   const weapon =
     cfg.weapons.find((w) => w.id === selectedWeaponId) ?? cfg.weapons[0];
   if (!weapon) return;
 
-  const iconPath = `assets/icon_weapon_selected_${weapon.id}.png`;
-  const img = p.loadImage(iconPath); // 👈 или кэшируй отдельно, если надо
-
   // Плавающая иконка (лёгкая анимация)
   const dy = Math.sin(p.frameCount / 10) * 1.5;
-  p.image(img, x, y + dy, size, size);
+  const img = selectedIcons[weapon.id];
+  p.image(img, x + 260, y - 40 + dy, 64, 120);
 
   // Урон
-  const [minDmg, maxDmg] = getBaseDamageRange(weapon);
+  // Чистый урон (точечный удар стихией или off)
+  const selectedEl = getActiveElementFromPointAbility(); // <-- из новой панели точечного удара
+  const dbg = DebugStatsPlayerDamage(cfg.player, selectedEl);
   p.fill(0);
   p.textSize(14);
   p.textAlign(p.LEFT, p.TOP);
-  p.text(`Урон: ${minDmg} – ${maxDmg}`, x + size + 10, y + size / 2 - 8);
+  p.text(`Чистый: ${dbg.min} – ${dbg.max}`, x + 240, y + size / 2 - 8 + 55);
 }
 
-function getBaseDamageRange(w: any): [number, number] {
-  switch (w.retaliationRule) {
-    case "t1":
-      return [12, 20];
-    case "t2":
-      return [18, 30];
-    case "t3":
-      return [24, 42];
-    default:
-      return [10, 16];
+// main.ts
+
+// ─── Игрок: компактный анти‑спам лог ──────────────────────────────────────────
+let lastPlayerDebugLine = "";
+
+// Порядок стихий как в проекте:
+const ELEMENTS_4: ElementKey[] = ["earth", "fire", "water", "cosmos"];
+
+/**
+ * DebugStatsPlayerDamage — считает «чистый» мин/макс для выбранной абилки,
+ * и одновременно готовит ОДНУ строку с диапазонами по КАЖДОЙ стихии (без матрицы).
+ * Никаких коэффициентов врага тут нет — это лог ИГРОКА.
+ *
+ * Формулы:
+ *   baseMin..baseMax = player.attack.min..max   (из config.json)
+ *   abilityPct = player.elements[selectedElement]  (0..1)
+ *   pure(min/max) = base(min/max) * abilityPct
+ *   critChance = luck/10 % (из ТЗ)
+ *
+ * Возвращает «чистый» диапазон для выбранной абилки (для вывода под оружием).
+ * В консоль печатает ОДНУ строку, если что‑то изменилось.
+ */
+function DebugStatsPlayerDamage(
+  player: PlayerCfg,
+  selectedElement: ElementKey
+) {
+  const atkMin = player.attack.min;
+  const atkMax = player.attack.max;
+  const luck = player.luck ?? 0;
+  const critChancePct = luck / 10; // каждые 10 удачи = +1% крита (из ТЗ)
+
+  // Чистый диапазон для выбранной абилки (без матрицы)
+  const abilityPctSel = player.elements?.[selectedElement] ?? 1;
+  const pureMinSel = Math.floor(atkMin * abilityPctSel);
+  const pureMaxSel = Math.floor(atkMax * abilityPctSel);
+
+  // Чистые диапазоны по всем 4 стихиям (без матрицы) — для лога
+  const parts: string[] = [];
+  for (const el of ELEMENTS_4) {
+    const pct = player.elements?.[el] ?? 1;
+    const dmin = Math.floor(atkMin * pct);
+    const dmax = Math.floor(atkMax * pct);
+    parts.push(`${el}=${dmin}-${dmax}`);
   }
+
+  const line =
+    `PLAYER base=${atkMin}-${atkMax} | luck=${luck} (crit=${critChancePct.toFixed(
+      1
+    )}%) | ` +
+    `selected=${selectedElement}(${(abilityPctSel * 100).toFixed(0)}%) | ` +
+    `pure=${pureMinSel}-${pureMaxSel} | ALL[ ${parts.join(" | ")} ]`;
+
+  if (line !== lastPlayerDebugLine) {
+    // console.clear(); // при желании можно чистить, чтобы была только актуальная строка
+    console.log(line);
+    lastPlayerDebugLine = line;
+  }
+
+  return { min: pureMinSel, max: pureMaxSel };
+}
+
+// ─── Luck / Crit / Miss helpers ──────────────────────────────────────────────
+
+// смещение ролла к максимуму: удача 0..100 → экспонента 1..0.3
+function rollByLuck(minVal: number, maxVal: number, luck: number): number {
+  const L = Math.max(0, Math.min(1, luck / 100));
+  const exp = Math.max(0.3, 1 - 0.7 * L); // больше удачи → сильнее «прижатие» к max
+  const u = Math.random() ** exp; // смещённое равномерное 0..1
+  return Math.round(minVal + (maxVal - minVal) * u);
+}
+
+// шанс крита: ⌊luck/10⌋ %, множитель ×2 (из таблицы переменных)
+function getCritFromLuck(luck: number) {
+  const pct = Math.floor(luck / 10);
+  const did = Math.random() * 100 < pct;
+  return { critPct: pct, didCrit: did, critMul: did ? 2 : 1 };
+}
+
+// шанс промаха по оружию и позиции с учётом удачи (конфиг weapons.miss)
+function getMissForWeapon(weapon: WeaponCfg, pos1to4: number, luck: number) {
+  const base =
+    weapon.miss?.baseByPos?.[Math.max(1, Math.min(4, pos1to4)) - 1] ?? 0;
+  const step = weapon.miss?.luckStep ?? 10;
+  const per = weapon.miss?.luckPerStepPct ?? 1;
+  const steps = Math.floor(luck / step);
+  const missPct = Math.max(0, Math.min(100, base - steps * per));
+  const didMiss = Math.random() * 100 < missPct;
+  return { missPct, didMiss };
+}
+
+// элементный коэффициент attacker→defender (дефолт 1.0)
+function getElemCoef(
+  matrix: ElementMatrixCfg | undefined,
+  atk: ElementKey,
+  def: ElementKey
+) {
+  const M = matrix ?? defaultElementMatrix;
+  return M[atk]?.[def] ?? 1.0;
+}
+
+// ─── Подробный лог урона по врагу ────────────────────────────────────────────
+let lastEnemyDebugStatic = "";
+
+function DebugStatsPlayerDamageAgainstEnemy(
+  player: PlayerCfg,
+  weapon: WeaponCfg,
+  enemy: Enemy,
+  matrix: ElementMatrixCfg
+) {
+  // 1) исходные данные
+  const baseMin = player.attack.min; // из config.json player.attack
+  const baseMax = player.attack.max; // (диапазон фиксированный)
+  const luck = player.luck ?? 0; // из config.json player.luck
+  const superId = getSelectedAbility?.() ?? null;
+  const ability: ElementKey =
+    superId === "weapon"
+      ? "none" // плитка оружия → чистый удар без стихии
+      : getActiveElementFromPointAbility();
+  // процент выбранной абилки (для "none" в player.elements записи нет → берём 1)
+  const abilityPct = player.elements?.[ability] ?? 1;
+
+  // «чистое» окно для выбранной абилки (без врага/матрицы/позиции)
+  const pureMin = Math.floor(baseMin * abilityPct);
+  const pureMax = Math.floor(baseMax * abilityPct);
+
+  // коэффициент стихий ability→enemy.element (матрица из config.json)
+  const coef = getElemCoef(matrix, ability, enemy.element);
+
+  // окно по цели (с учётом стихии)
+  const vsMin = Math.floor(pureMin * coef);
+  const vsMax = Math.floor(pureMax * coef);
+
+  // шанс промаха оружия по позиции с учётом удачи (из weapons.*.miss в конфиге)
+  const posIdx = Math.max(1, Math.min(4, enemy.row));
+  const { missPct } = getMissForWeapon(weapon, posIdx, luck); //
+
+  // шанс крита от удачи (из таблицы переменных)
+  const critPct = Math.floor(luck / 10); //
+
+  // ── статический протокол (печатаем только если вводные поменялись)
+  const staticLine = [
+    "=== Подробный расчёт удара ===",
+    `Цель: #${enemy.id} (${enemy.kind}) elem=${enemy.element} row=${enemy.row}`,
+    `Оружие: ${weapon.name} (id=${weapon.id})`,
+    `База игрока: ${baseMin}-${baseMax}`,
+    `Удача: ${luck} ⇒ крит=${critPct}%`,
+    `Абилка: ${ability} (${(abilityPct * 100).toFixed(0)}%)`,
+    `Чистый (base×ab%): ${pureMin}-${pureMax}`,
+    `Коэф(ability→enemy): ×${coef}`,
+    `По цели (с учётом стихии): ${vsMin}-${vsMax}`,
+    `Промах(pos=${posIdx}): ${missPct.toFixed(1)}%`,
+  ].join(" | ");
+
+  if (staticLine !== lastEnemyDebugStatic) {
+    console.log(staticLine);
+    lastEnemyDebugStatic = staticLine;
+  }
+
+  // ── итог одного клика (всегда печатаем)
+  // ролл по чистому окну с учётом удачи (min/max сами не двигаем)
+  const baseRoll = rollByLuck(pureMin, pureMax, luck);
+
+  // крит
+  const { didCrit, critMul } = getCritFromLuck(luck);
+
+  // применяем стихию и крит
+  const rolledVsElem = Math.round(baseRoll * coef * critMul);
+
+  // промах — финальная проверка
+  const { didMiss } = getMissForWeapon(weapon, posIdx, luck);
+
+  const finalDamage = didMiss ? 0 : rolledVsElem;
+  const outcome = didMiss ? "МИМО" : "ПОПАЛ";
+  const critTag = didCrit ? "КРИТ×2" : "без крита";
+
+  console.log(
+    `Ролл: base=${baseRoll} | ${critTag} | по цели=${rolledVsElem} | результат: ${outcome} (${finalDamage})`
+  );
+
+  return {
+    ability,
+    abilityPct,
+    coef,
+    baseMin,
+    baseMax,
+    pureMin,
+    pureMax,
+    vsMin,
+    vsMax,
+    missPct,
+    critPct,
+    posIdx,
+    baseRoll,
+    didCrit,
+    didMiss,
+    finalDamage,
+  };
 }

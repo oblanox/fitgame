@@ -26,7 +26,7 @@ export function drawHpStatus(
 
   // 🔹 Вычислим укороченную полоску HP (70% ширины)
   const barW = Math.floor(w * 0.7);
-  const barX = x + Math.floor((w - barW) / 2);
+  const barX = x + 12; // + Math.floor((w - barW) / 2);
   const barY = y;
 
   // 🔹 Светлая основа полосы

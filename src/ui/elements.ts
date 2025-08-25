@@ -1,71 +1,107 @@
-// elements.ts
+// elements.ts — ПАНЕЛЬ ТОЧЕЧНОГО УДАРА (ab1..ab4) + OFF
 import p5 from "p5";
 
-// Типы
 export type ElementKey = "earth" | "fire" | "water" | "cosmos";
 
-// Цвета для круга
-const ELEMENT_COLOR: Record<ElementKey, string> = {
-  earth: "#129447", // зелёный
-  fire: "#E53935", // красный
-  water: "#1E88E5", // синий
-  cosmos: "#8E24AA", // фиолетовый
+// Точечные абилки: 4 стихии + off
+export type PointAbilityId = "ab1" | "ab2" | "ab3" | "ab4"; // ← без off
+// соответствие абилки → стихия
+const POINT_AB_TO_ELEMENT: Record<
+  Exclude<PointAbilityId, "off">,
+  ElementKey
+> = {
+  ab1: "earth",
+  ab2: "fire",
+  ab3: "water",
+  ab4: "cosmos",
 };
 
-// Порядок отображения
-const ELEMENTS: ElementKey[] = ["earth", "fire", "water", "cosmos"];
+const COLOR: Record<ElementKey, string> = {
+  earth: "#129447",
+  fire: "#E53935",
+  water: "#1E88E5",
+  cosmos: "#8E24AA",
+};
 
-// ===== Состояние =====
-let selectedElement: ElementKey = "earth";
-let hitboxes: { x: number; y: number; w: number; h: number; el: ElementKey }[] =
-  [];
+const ORDER: PointAbilityId[] = ["ab1", "ab2", "ab3", "ab4"];
 
-// ===== Отрисовка панели =====
-export function drawElementPanel(
+let selectedPointAbility: PointAbilityId = "ab1";
+let hitboxes: { x: number; y: number; r: number; id: PointAbilityId }[] = [];
+
+// ПОСЛЕ
+export function drawPointAbilityPanel(
   p: p5,
-  opts: { x: number; y: number; size?: number; gap?: number }
+  opts: {
+    x: number;
+    y: number;
+    w?: number;
+    size?: number;
+    gap?: number;
+    playerElements?: Partial<Record<ElementKey, number>>;
+  }
 ) {
-  const { x, y, size = 48, gap = 12 } = opts;
-
+  const { x, y, w = 360, size = 48, gap = 12, playerElements = {} } = opts;
   hitboxes = [];
 
-  ELEMENTS.forEach((el, i) => {
-    const cx = x + i * (size + gap);
-    const cy = y;
+  const totalW = ORDER.length * size + (ORDER.length - 1) * gap;
+  const startX = x + Math.max(0, Math.floor((w - totalW) / 2));
+  const cy = y + size / 2;
 
-    const isSelected = el === selectedElement;
+  ORDER.forEach((id, idx) => {
+    const cx = startX + idx * (size + gap);
+    const isSel = id === selectedPointAbility;
 
-    // Подсветка
-    if (isSelected) {
+    p.noStroke();
+    p.fill(255);
+    p.rect(cx - 2, y - 2, size + 4, size + 4, 10);
+
+    // фон круга
+    const el = POINT_AB_TO_ELEMENT[id];
+    const pct = Math.round((playerElements[el] ?? 1) * 100);
+    p.noStroke();
+    p.textAlign(p.CENTER, p.CENTER);
+    p.textSize(Math.floor(size * 0.34));
+    p.fill(255);
+    p.text(`${pct}%`, cx + size / 2, cy);
+
+    // обводка выбора
+    if (isSel) {
+      p.noFill();
       p.stroke("#ff9800");
       p.strokeWeight(3);
-    } else {
-      p.noStroke();
+      p.circle(cx + size / 2, cy, size + 6);
     }
 
-    p.fill(ELEMENT_COLOR[el]);
-    p.circle(cx + size / 2, cy + size / 2, size);
+    // надпись внутри круга
+    p.noStroke();
+    p.textAlign(p.CENTER, p.CENTER);
+    p.textSize(Math.floor(size * 0.34));
 
-    hitboxes.push({ x: cx, y: cy, w: size, h: size, el });
+    p.fill(255);
+    p.text(`${pct}%`, cx + size / 2, cy); // ← теперь процент
+    hitboxes.push({ x: cx + size / 2, y: cy, r: size / 2, id });
   });
 }
 
-// ===== Обработка кликов =====
-export function handleElementClick(mx: number, my: number): ElementKey | null {
+export function handlePointAbilityClick(
+  mx: number,
+  my: number
+): PointAbilityId | null {
   for (const h of hitboxes) {
-    if (mx >= h.x && mx <= h.x + h.w && my >= h.y && my <= h.y + h.h) {
-      selectedElement = h.el;
-      return h.el;
+    const d = Math.hypot(mx - h.x, my - h.y);
+    if (d <= h.r) {
+      selectedPointAbility = h.id;
+      return h.id;
     }
   }
   return null;
 }
 
-// ===== Геттер и сеттер =====
-export function getSelectedElement(): ElementKey {
-  return selectedElement;
+export function setSelectedPointAbility(id: PointAbilityId) {
+  selectedPointAbility = id;
 }
 
-export function setSelectedElement(el: ElementKey) {
-  selectedElement = el;
+// вернуть активную стихию для удара: ab1..ab4 → её стихия, off → "none"
+export function getActiveElementFromPointAbility(): ElementKey {
+  return POINT_AB_TO_ELEMENT[selectedPointAbility];
 }
