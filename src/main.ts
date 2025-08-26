@@ -4,6 +4,7 @@ import {
   drawWeaponPanel,
   handleWeaponClick,
   getSelectedWeapon,
+  getWeaponIcon,
   preloadWeaponIcons,
   Weapon,
   getWeapons,
@@ -20,18 +21,16 @@ import { drawElementSchema, preloadElementSchema } from "@ui/element_schemes";
 import {
   drawAbilityPanel,
   handleAbilityClick,
-  getSelectedAbility,
-  setSelectedAbility
+  setSelectedAbility,
 } from "./ui/abilities";
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  СТИХИИ И ВСПОМОГАТЕЛЬНОЕ
-  - ElementKey: 4 стихии проекта.
-  - ELEMENT_COLOR: цвет круга на поле.
-  - toElementKey: нормализация значений из config.json
-    (понимает новые earth/water .
-────────────────────────────────────────────────────────────────────────────── */
-type ElementKey = "earth" | "fire" | "water" | "cosmos";
+   СТИХИИ И ВСПОМОГАТЕЛЬНОЕ
+   - ElementKey: 4 стихии проекта.
+   - ELEMENT_COLOR: цвет круга на поле.
+   - toElementKey: нормализация значений из config.json (понимает новые earth/water
+   ────────────────────────────────────────────────────────────────────────────── */
+type ElementKey = "earth" | "fire" | "water" | "cosmos" | "none";
 type AttackKey = "min" | "max";
 
 const ELEMENT_COLOR: Record<ElementKey, string> = {
@@ -39,6 +38,7 @@ const ELEMENT_COLOR: Record<ElementKey, string> = {
   fire: "#E53935", // красный — огонь
   water: "#1E88E5", // синий — вода
   cosmos: "#8E24AA", // фиолетовый — космос
+  none: "#FFFFFF",
 };
 
 // алиасы для совместимости со старыми конфигами (green→earth, cold→water)
@@ -50,6 +50,7 @@ const ELEMENT_ALIAS: Record<string, ElementKey> = {
   green: "earth",
   cold: "water",
 };
+
 function toElementKey(s: string): ElementKey {
   const k = (s ?? "").toLowerCase();
   return ELEMENT_ALIAS[k] ?? "earth";
@@ -59,12 +60,12 @@ function toElementKey(s: string): ElementKey {
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  ТИПЫ КОНФИГА (используемая часть)
-  - FieldCfg: визуальные параметры поля (цвета, размеры, линии).
-  - BossCfg, MinionCfg: то, что рендерим на поле.
-  - Cfg: корневой конфиг.
-  Примечание: все поля опциональные, дефолты подставляются в коде.
-────────────────────────────────────────────────────────────────────────────── */
+   ТИПЫ КОНФИГА (используемая часть)
+   - FieldCfg: визуальные параметры поля (цвета, размеры, линии).
+   - BossCfg, MinionCfg: то, что рендерим на поле.
+   - Cfg: корневой конфиг.
+   Примечание: все поля опциональные, дефолты подставляются в коде.
+   ────────────────────────────────────────────────────────────────────────────── */
 type Padding = { left: number; right: number; top: number; bottom: number };
 
 type FieldCfg = {
@@ -127,10 +128,11 @@ type WeaponCfg = {
 type ElementMatrixCfg = Record<ElementKey, Record<ElementKey, number>>;
 
 const defaultElementMatrix: ElementMatrixCfg = {
-  earth: { earth: 1, fire: 1, water: 1, cosmos: 1 },
-  fire: { earth: 1, fire: 1, water: 1, cosmos: 1 },
-  water: { earth: 1, fire: 1, water: 1, cosmos: 1 },
-  cosmos: { earth: 1, fire: 1, water: 1, cosmos: 1 },
+  earth: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
+  fire: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
+  water: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
+  cosmos: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
+  none: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
 };
 
 type Cfg = {
@@ -143,17 +145,14 @@ type Cfg = {
 };
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  СОСТОЯНИЕ ВИЗУАЛИЗАЦИИ
-  - cfg: текущая конфигурация (из /public/config.json или загруженная файлом).
-  - enemies: подготовленные к рендеру сущности (миньоны + босс).
-────────────────────────────────────────────────────────────────────────────── */
+   СОСТОЯНИЕ ВИЗУАЛИЗАЦИИ
+   - cfg: текущая конфигурация (из /public/config.json или загруженная файлом).
+   - enemies: подготовленные к рендеру сущности (миньоны + босс).
+   ────────────────────────────────────────────────────────────────────────────── */
 let cfg: Cfg | null = null;
-
 let selectedWeaponId: number = 1;
-
 const abilityIdx = 1; // пока просто выводим в шапке
 const weaponIdx = 1;
-
 let playerHp = 0;
 let hitsLeft = 0;
 
@@ -170,14 +169,15 @@ type Enemy = {
   r: number; // радиус круга (px)
   lineOffset: number; // смещение относительно линии (+вниз, -вверх)
 };
+
 let enemies: Enemy[] = [];
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  ЗАГРУЗКА И НОРМАЛИЗАЦИЯ КОНФИГА
-  - loadConfig(): fetch → cfg → resetSession()
-  - resetSession(): перенос значений из cfg в runtime-состояние (enemies и пр.)
-  - normalize…(): приводим earth/water и старые ключи, подставляем дефолты поля
-────────────────────────────────────────────────────────────────────────────── */
+   ЗАГРУЗКА И НОРМАЛИЗАЦИЯ КОНФИГА
+   - loadConfig(): fetch → cfg → resetSession()
+   - resetSession(): перенос значений из cfg в runtime-состояние (enemies и пр.)
+   - normalize…(): приводим earth/water и старые ключи, подставляем дефолты поля
+   ────────────────────────────────────────────────────────────────────────────── */
 async function loadConfig(url = "/config.json") {
   try {
     const r = await fetch(url, { cache: "no-store" });
@@ -204,16 +204,8 @@ async function loadConfig(url = "/config.json") {
         luck: 1,
         def: 1,
         maxHits: 60,
-        attack: {
-          min: 1,
-          max: 10,
-        },
-        elements: {
-          earth: 0.25,
-          fire: 0.25,
-          water: 0.25,
-          cosmos: 0.25,
-        },
+        attack: { min: 1, max: 10 },
+        elements: { earth: 0.25, fire: 0.25, water: 0.25, cosmos: 0.25 },
       },
       boss: {
         type: 1,
@@ -228,10 +220,11 @@ async function loadConfig(url = "/config.json") {
       minions: [],
       weapons: [],
       elementMatrix: {
-        earth: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0 },
-        fire: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0 },
-        water: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0 },
-        cosmos: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0 },
+        earth: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
+        fire: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
+        water: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
+        cosmos: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
+        none: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
       },
     };
   }
@@ -276,7 +269,6 @@ function resetSession() {
 
   playerHp = cfg.player.hp;
   hitsLeft = cfg.player.hits;
-
   enemies = [];
 
   // переносим миньонов из конфига в состояние рендера
@@ -316,15 +308,14 @@ function resetSession() {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  ГЕОМЕТРИЯ ПОЛЯ
-  - getFieldRect(): прямоугольник поля внутри canvas (с учётом widthRatio/padding)
-  - getRowYs(): массив Y-координат линий (с lineInsetTop/Bottom и lineStep)
-────────────────────────────────────────────────────────────────────────────── */
+   ГЕОМЕТРИЯ ПОЛЯ
+   - getFieldRect(): прямоугольник поля внутри canvas (с учётом widthRatio/padding)
+   - getRowYs(): массив Y-координат линий (с lineInsetTop/Bottom и lineStep)
+   ────────────────────────────────────────────────────────────────────────────── */
 function getFieldRect() {
   // текущий размер canvas (фиксированный; можно вынести в cfg при желании)
   const W = 960,
     H = 540;
-
   const f = cfg!.field!; // к этому моменту normalizeConfig уже подставил дефолты
 
   const fieldW = Math.floor(W * clamp(f.widthRatio ?? 0.35, 0, 1));
@@ -343,31 +334,29 @@ function getRowYs(
 ) {
   const insetTop = field.lineInsetTop ?? 14;
   const insetBottom = field.lineInsetBottom ?? 14;
-
   const usableH = rect.fieldH - insetTop - insetBottom;
   const rowsCount = Math.max(2, rows);
 
   // авто‑шаг (равномерно) и «принудительный» шаг, если задан в конфиге
   const stepAuto = usableH / (rowsCount - 1);
   const step = field.lineStep ? Math.min(field.lineStep, stepAuto) : stepAuto;
-
   const y0 = rect.fieldY + rect.fieldH - insetBottom; // нижняя линия
+
   return Array.from({ length: rowsCount }, (_, i) => y0 - i * step);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  РАЗМЕТКА СУЩЕСТВ (row/col → x,y)
-  - rowIdx → берём Y линии
-  - lineOffset → смещаем сверху/снизу относительно линии
-  - ограничиваем по границам поля (с учётом радиуса)
-────────────────────────────────────────────────────────────────────────────── */
+   РАЗМЕТКА СУЩЕСТВ (row/col → x,y)
+   - rowIdx → берём Y линии
+   - lineOffset → смещаем сверху/снизу относительно линии
+   - ограничиваем по границам поля (с учётом радиуса)
+   ────────────────────────────────────────────────────────────────────────────── */
 function layoutEnemies() {
   if (!cfg) return;
 
   const rect = getFieldRect();
   const rows = Math.max(2, cfg.field!.rows ?? 5);
   const rowYs = getRowYs(rows, rect, cfg.field!);
-
   const xAt = (col: number) => rect.fieldX + clamp(col, 0, 1) * rect.fieldW;
 
   for (const e of enemies) {
@@ -377,31 +366,33 @@ function layoutEnemies() {
     // не вылезаем из прямоугольника поля по Y
     const minY = rect.fieldY + e.r;
     const maxY = rect.fieldY + rect.fieldH - e.r;
-
     e.x = xAt(e.col);
     e.y = clamp(baseY, minY, maxY);
   }
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  HUD (верхние надписи не на canvas) — краткая служебная инфа
-────────────────────────────────────────────────────────────────────────────── */
+   HUD (верхние надписи не на canvas) — краткая служебная инфа
+   ────────────────────────────────────────────────────────────────────────────── */
 function updateHud() {
   if (!cfg) return;
+
   const hpEl = document.getElementById("hp");
   if (hpEl)
     hpEl.textContent = `HP: ${playerHp}/${cfg.player.hpMax} | Ходы: ${hitsLeft}`;
+
   const ab = document.getElementById("ability");
   if (ab) ab.textContent = `Абилка: ${abilityIdx}`;
+
   const we = document.getElementById("weapon");
   if (we) we.textContent = `Оружие: ${weaponIdx}`;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  РЕНДЕР ОДНОГО КРУГА: подписи HP/ATK на самом кружке
-  - у босса крупнее шрифт.
-  - белый полу‑прозрачный обводочный контур для читаемости.
-────────────────────────────────────────────────────────────────────────────── */
+   РЕНДЕР ОДНОГО КРУГА: подписи HP/ATK на самом кружке
+   - у босса крупнее шрифт.
+   - белый полу‑прозрачный обводочный контур для читаемости.
+   ────────────────────────────────────────────────────────────────────────────── */
 function drawEnemyBadge(s: p5, e: Enemy) {
   const isBoss = e.kind === "boss";
   const hpSize = isBoss ? 36 : 16;
@@ -430,12 +421,12 @@ function drawEnemyBadge(s: p5, e: Enemy) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  P5 СЦЕНА: setup/draw/интерактив
-  - рисуем поле, линии и подписи «1..N» слева;
-  - рисуем все круги (с выделением при наведении);
-  - рисуем HP‑линию игрока внизу;
-  - лёгкая «болтанка» оружия как плейсхолдер.
-────────────────────────────────────────────────────────────────────────────── */
+   P5 СЦЕНА: setup/draw/интерактив
+   - рисуем поле, линии и подписи «1..N» слева;
+   - рисуем все круги (с выделением при наведении);
+   - рисуем HP‑линию игрока внизу;
+   - лёгкая «болтанка» оружия как плейсхолдер.
+   ────────────────────────────────────────────────────────────────────────────── */
 const selectedIcons: Record<number, p5.Image> = {};
 
 const sketch = (s: p5) => {
@@ -487,6 +478,7 @@ const sketch = (s: p5) => {
     s.strokeWeight(cfg.field!.lineThickness ?? 3);
     s.textAlign(s.RIGHT, s.CENTER);
     s.fill(cfg.field!.line!);
+
     for (let r = 1; r <= rows; r++) {
       const y = rowYs[r - 1];
       s.line(fieldX, y, fieldX + fieldW, y);
@@ -516,15 +508,15 @@ const sketch = (s: p5) => {
 
     let barY = fieldH;
     const weaponY = barY;
-    drawPanelBg(s, fieldX, barY, fieldW, 750, cfg.field?.bg);
 
+    drawPanelBg(s, fieldX, barY, fieldW, 750, cfg.field?.bg);
     drawHpStatus(s, fieldX, barY, fieldW, {
       hp: cfg.player.hp,
       hpMax: cfg.player.hpMax,
     });
 
-    barY = barY + 60;
-    // чуть ниже полоски HP
+    barY = barY + 60; // чуть ниже полоски HP
+
     //const weaponW = Math.floor(fieldW * 0.7);
     //const weaponX = fieldX + (fieldW - weaponW) / 2;
     drawWeaponPanel(
@@ -538,19 +530,17 @@ const sketch = (s: p5) => {
         y: barY,
       }
     );
+
     drawSelectedWeaponIcon(s, fieldX, weaponY);
     barY += 60;
 
     const rule = getSelectedWeaponCfg()?.retaliationRule ?? "t1";
-    const weaponImg = selectedIcons[getSelectedWeaponCfg()?.id ?? 1];
-    drawAbilityPanel(s, fieldX, barY, fieldW, {
-      rule,
-      weaponTile: {
-        img: weaponImg,
-        min: cfg.player.attack.min,
-        max: cfg.player.attack.max,
-      },
-    });
+    const selectedWeapon = getSelectedWeapon();
+    const weaponImg = selectedWeapon
+      ? getWeaponIcon(selectedWeapon.kind) ?? undefined
+      : undefined;
+
+    drawAbilityPanel(s, fieldX, barY, fieldW, { rule, weaponImg });
     barY += 90;
 
     drawPointAbilityPanel(s, {
@@ -558,9 +548,8 @@ const sketch = (s: p5) => {
       y: barY,
       w: fieldW,
       playerElements: cfg.player.elements,
+      debug: true,
     });
-    barY += 80;
-
     barY += 80;
 
     drawPlayerStats(
@@ -579,6 +568,7 @@ const sketch = (s: p5) => {
     );
 
     barY += 130;
+
     if (cfg.elementMatrix) {
       drawElementSchema(s, fieldX, barY, fieldW, cfg.elementMatrix);
     }
@@ -607,17 +597,20 @@ const sketch = (s: p5) => {
       return; // стопим дальнейшую обработку
     }
 
-    // 2) точечный удар
+    // 2) Панель точечного удара
     const pickedPoint = handlePointAbilityClick(s.mouseX, s.mouseY);
     if (pickedPoint) {
-      setSelectedAbility(null); // сброс суперудара
+      // выбрали точечный → сбрасываем супер
+      setSelectedAbility(null);
       console.log("Точечный удар:", pickedPoint);
       return;
     }
 
-    // 3) суперудары
+    // 3) Панель суперударов
     const pickedSuper = handleAbilityClick(s.mouseX, s.mouseY);
     if (pickedSuper) {
+      // выбрали супер → выключаем точечный
+      setSelectedPointAbility("off"); // ← НОВОЕ
       console.log("Суперудар:", pickedSuper);
       return;
     }
@@ -642,11 +635,11 @@ const sketch = (s: p5) => {
 };
 
 /* ──────────────────────────────────────────────────────────────────────────────
-  ЗАПУСК СЦЕНЫ + UI‑события
-  - загружаем config.json;
-  - создаём canvas;
-  - подписываемся на кнопки: restart и загрузка произвольного конф. файла.
-────────────────────────────────────────────────────────────────────────────── */
+   ЗАПУСК СЦЕНЫ + UI‑события
+   - загружаем config.json;
+   - создаём canvas;
+   - подписываемся на кнопки: restart и загрузка произвольного конф. файла.
+   ────────────────────────────────────────────────────────────────────────────── */
 (async () => {
   await loadConfig();
   new p5(sketch);
@@ -661,6 +654,7 @@ const sketch = (s: p5) => {
   fileInput?.addEventListener("change", (ev) => {
     const input = ev.target as HTMLInputElement;
     if (!input.files || !input.files[0]) return;
+
     input.files[0].text().then((txt) => {
       cfg = JSON.parse(txt) as Cfg;
       normalizeConfig();
@@ -697,7 +691,6 @@ function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
 }
 
 // main.ts
-
 // ─── Игрок: компактный анти‑спам лог ──────────────────────────────────────────
 let lastPlayerDebugLine = "";
 
@@ -710,10 +703,10 @@ const ELEMENTS_4: ElementKey[] = ["earth", "fire", "water", "cosmos"];
  * Никаких коэффициентов врага тут нет — это лог ИГРОКА.
  *
  * Формулы:
- *   baseMin..baseMax = player.attack.min..max   (из config.json)
- *   abilityPct = player.elements[selectedElement]  (0..1)
- *   pure(min/max) = base(min/max) * abilityPct
- *   critChance = luck/10 % (из ТЗ)
+ * baseMin..baseMax = player.attack.min..max (из config.json)
+ * abilityPct = player.elements[selectedElement] (0..1)
+ * pure(min/max) = base(min/max) * abilityPct
+ * critChance = luck/10 % (из ТЗ)
  *
  * Возвращает «чистый» диапазон для выбранной абилки (для вывода под оружием).
  * В консоль печатает ОДНУ строку, если что‑то изменилось.
@@ -741,12 +734,11 @@ function DebugStatsPlayerDamage(
     parts.push(`${el}=${dmin}-${dmax}`);
   }
 
-  const line =
-    `PLAYER base=${atkMin}-${atkMax} | luck=${luck} (crit=${critChancePct.toFixed(
-      1
-    )}%) | ` +
-    `selected=${selectedElement}(${(abilityPctSel * 100).toFixed(0)}%) | ` +
-    `pure=${pureMinSel}-${pureMaxSel} | ALL[ ${parts.join(" | ")} ]`;
+  const line = `PLAYER base=${atkMin}-${atkMax} | luck=${luck} (crit=${critChancePct.toFixed(
+    1
+  )}%) | + selected=${selectedElement}(${(abilityPctSel * 100).toFixed(
+    0
+  )}%) | + pure=${pureMinSel}-${pureMaxSel} | ALL[ ${parts.join(" | ")} ]`;
 
   if (line !== lastPlayerDebugLine) {
     // console.clear(); // при желании можно чистить, чтобы была только актуальная строка
@@ -758,7 +750,6 @@ function DebugStatsPlayerDamage(
 }
 
 // ─── Luck / Crit / Miss helpers ──────────────────────────────────────────────
-
 // смещение ролла к максимуму: удача 0..100 → экспонента 1..0.3
 function rollByLuck(minVal: number, maxVal: number, luck: number): number {
   const L = Math.max(0, Math.min(1, luck / 100));
@@ -809,11 +800,9 @@ function DebugStatsPlayerDamageAgainstEnemy(
   const baseMin = player.attack.min; // из config.json player.attack
   const baseMax = player.attack.max; // (диапазон фиксированный)
   const luck = player.luck ?? 0; // из config.json player.luck
-  const superId = getSelectedAbility?.() ?? null;
-  const ability: ElementKey =
-    superId === "weapon"
-      ? "none" // плитка оружия → чистый удар без стихии
-      : getActiveElementFromPointAbility();
+  // активная стихия берётся из панели Точечного удара (ab1..ab4) или "none" при off
+  const ability = getActiveElementFromPointAbility(); // ElementKey
+
   // процент выбранной абилки (для "none" в player.elements записи нет → берём 1)
   const abilityPct = player.elements?.[ability] ?? 1;
 
@@ -822,20 +811,21 @@ function DebugStatsPlayerDamageAgainstEnemy(
   const pureMax = Math.floor(baseMax * abilityPct);
 
   // коэффициент стихий ability→enemy.element (матрица из config.json)
-  const coef = getElemCoef(matrix, ability, enemy.element);
+  const coef =
+    ability === "none" ? 1 : getElemCoef(matrix, ability, enemy.element);
 
-  // окно по цели (с учётом стихии)
+  // // окно по цели (с учётом стихии)
   const vsMin = Math.floor(pureMin * coef);
   const vsMax = Math.floor(pureMax * coef);
 
   // шанс промаха оружия по позиции с учётом удачи (из weapons.*.miss в конфиге)
   const posIdx = Math.max(1, Math.min(4, enemy.row));
-  const { missPct } = getMissForWeapon(weapon, posIdx, luck); //
+  const { missPct } = getMissForWeapon(weapon, posIdx, luck);
 
-  // шанс крита от удачи (из таблицы переменных)
-  const critPct = Math.floor(luck / 10); //
+  // // шанс крита от удачи (из таблицы переменных)
+  const critPct = Math.floor(luck / 10);
 
-  // ── статический протокол (печатаем только если вводные поменялись)
+  // // ── статический протокол (печатаем только если вводные поменялись)
   const staticLine = [
     "=== Подробный расчёт удара ===",
     `Цель: #${enemy.id} (${enemy.kind}) elem=${enemy.element} row=${enemy.row}`,
@@ -856,41 +846,5 @@ function DebugStatsPlayerDamageAgainstEnemy(
 
   // ── итог одного клика (всегда печатаем)
   // ролл по чистому окну с учётом удачи (min/max сами не двигаем)
-  const baseRoll = rollByLuck(pureMin, pureMax, luck);
-
-  // крит
-  const { didCrit, critMul } = getCritFromLuck(luck);
-
-  // применяем стихию и крит
-  const rolledVsElem = Math.round(baseRoll * coef * critMul);
-
-  // промах — финальная проверка
-  const { didMiss } = getMissForWeapon(weapon, posIdx, luck);
-
-  const finalDamage = didMiss ? 0 : rolledVsElem;
-  const outcome = didMiss ? "МИМО" : "ПОПАЛ";
-  const critTag = didCrit ? "КРИТ×2" : "без крита";
-
-  console.log(
-    `Ролл: base=${baseRoll} | ${critTag} | по цели=${rolledVsElem} | результат: ${outcome} (${finalDamage})`
-  );
-
-  return {
-    ability,
-    abilityPct,
-    coef,
-    baseMin,
-    baseMax,
-    pureMin,
-    pureMax,
-    vsMin,
-    vsMax,
-    missPct,
-    critPct,
-    posIdx,
-    baseRoll,
-    didCrit,
-    didMiss,
-    finalDamage,
-  };
+  const baseR = 0; // TODO: реализовать ролл
 }

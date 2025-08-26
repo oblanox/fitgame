@@ -148,3 +148,7 @@ export function getWeapons(cfg: any): Weapon[] {
     kind: detectKind(w),
   }));
 }
+
+export function getWeaponIcon(kind: WeaponKind): p5.Image | null {
+  return icons[kind] ?? null;
+}
