@@ -151,6 +151,11 @@ export function drawAbilityPanel(
   const enabledList = new Set(RULE_SUPERS[data.rule] ?? []);
   if (data.selected !== undefined) selectedSuper = data.selected;
 
+  // 🔧 сбросить выбор, если текущая абилка не поддерживается оружием
+  if (selectedSuper && !enabledList.has(selectedSuper)) {
+    selectedSuper = "ab0"; // ← переключаем на обычный удар
+  }
+
   hits = [];
   const size = 46,
     gap = 16;
