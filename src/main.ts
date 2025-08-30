@@ -6,7 +6,6 @@ import {
   getSelectedWeapon,
   getWeaponIcon,
   preloadWeaponIcons,
-  Weapon,
   getWeapons,
 } from "./ui/weapons";
 import {
@@ -25,26 +24,20 @@ import {
   getSelectedAbility,
   isSuperAbilityEnabled,
 } from "./ui/abilities";
-import { initGameLogger, drawLogPanel, gameLog } from "./ui/log_panel";
+import { initGameLogger, drawLogPanel } from "./ui/log_panel";
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   СТИХИИ И ВСПОМОГАТЕЛЬНОЕ
-   - ElementKey: 4 стихии проекта.
-   - ELEMENT_COLOR: цвет круга на поле.
-   - toElementKey: нормализация значений из config.json (понимает новые earth/water
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ────────────── Основные типы и константы ────────────── */
 type ElementKey = "earth" | "fire" | "water" | "cosmos" | "none";
 type AttackKey = "min" | "max";
 
 const ELEMENT_COLOR: Record<ElementKey, string> = {
-  earth: "#129447", // зелёный — земля
-  fire: "#E53935", // красный — огонь
-  water: "#1E88E5", // синий — вода
-  cosmos: "#8E24AA", // фиолетовый — космос
+  earth: "#129447",
+  fire: "#E53935",
+  water: "#1E88E5",
+  cosmos: "#8E24AA",
   none: "#FFFFFF",
 };
 
-// алиасы для совместимости со старыми конфигами (green→earth, cold→water)
 const ELEMENT_ALIAS: Record<string, ElementKey> = {
   earth: "earth",
   fire: "fire",
@@ -59,28 +52,20 @@ function toElementKey(s: string): ElementKey {
   return ELEMENT_ALIAS[k] ?? "earth";
 }
 
-// крошечные утилиты
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   ТИПЫ КОНФИГА (используемая часть)
-   - FieldCfg: визуальные параметры поля (цвета, размеры, линии).
-   - BossCfg, MinionCfg: то, что рендерим на поле.
-   - Cfg: корневой конфиг.
-   Примечание: все поля опциональные, дефолты подставляются в коде.
-   ────────────────────────────────────────────────────────────────────────────── */
 type Padding = { left: number; right: number; top: number; bottom: number };
 
 type FieldCfg = {
-  bg?: string; // цвет фона области боя
-  line?: string; // цвет горизонтальных линий
-  rows?: number; // кол-во линий (и, соответственно, «уровней»)
-  widthRatio?: number; // доля ширины canvas, которую занимает поле
-  padding?: Padding; // отступы поля от краёв canvas
-  lineInsetTop?: number; // отступ верхней линии от верхней границы поля
-  lineInsetBottom?: number; // отступ нижней линии от нижней границы поля
-  lineThickness?: number; // толщина линии
-  lineStep?: number; // ЯВНЫЙ шаг между линиями (px). Если не влезает — урежем.
+  bg?: string;
+  line?: string;
+  rows?: number;
+  widthRatio?: number;
+  padding?: Padding;
+  lineInsetTop?: number;
+  lineInsetBottom?: number;
+  lineThickness?: number;
+  lineStep?: number;
 };
 
 type PlayerCfg = {
@@ -102,7 +87,7 @@ type BossCfg = {
   row?: number;
   col?: number;
   radius?: number;
-  lineOffset?: number; // индивидуальный вертикальный сдвиг от линии
+  lineOffset?: number;
 };
 
 type MinionCfg = {
@@ -114,14 +99,14 @@ type MinionCfg = {
   row?: number;
   col?: number;
   radius?: number;
-  lineOffset?: number; // индивидуальный вертикальный сдвиг от линии
+  lineOffset?: number;
 };
 
 type WeaponCfg = {
   id: number;
   name: string;
   miss: {
-    baseByPos: number[]; // [0, 0, 0, 0] или [15, 30, 45, 60] — массив из 4 чисел
+    baseByPos: number[];
     luckStep: number;
     luckPerStepPct: number;
   };
@@ -147,43 +132,29 @@ type Cfg = {
   elementMatrix?: ElementMatrixCfg;
 };
 
-/* ПОЛЯ АНИМАЦИЯ И ЭФФЕКТОВ */
-
-/* ────────────────────────────────────────────────────────────────────────────
-   Ответка врага: «опускаем целиком врага к полоске HP → красный всплеск → назад»
-   — без изменения типов Enemy и Cfg
-   — состояние анимации хранится в WeakMap
-   — всплеск рисуем отдельным оверлеем (вызывается после drawHpStatus)
-──────────────────────────────────────────────────────────────────────────── */
-
+/* ────────────── Анимация ответки врага ────────────── */
 type RetaliationRule = "t1" | "t2" | "t3";
-
 type EnemyAnimState = {
   phase: "down" | "hit" | "up";
   t0: number;
-  downMs: number; // спуск к HP
-  hitMs: number; // удержание + нанесение урона в конце
-  upMs: number; // возврат
-  startY: number; // стартовая Y врага (мировая/экранная)
-  targetY: number; // целевая Y (якорь HP)
+  downMs: number;
+  hitMs: number;
+  upMs: number;
+  startY: number;
+  targetY: number;
   dmgApplied: boolean;
 };
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   СОСТОЯНИЕ ВИЗУАЛИЗАЦИИ
-   - cfg: текущая конфигурация (из /public/config.json или загруженная файлом).
-   - enemies: подготовленные к рендеру сущности (миньоны + босс).
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ────────────── Состояние визуализации ────────────── */
 let cfg: Cfg | null = null;
-let selectedWeaponId: number = 1;
-const abilityIdx = 1; // пока просто выводим в шапке
+let selectedWeaponId = 1;
+const abilityIdx = 1;
 const weaponIdx = 1;
 let playerHp = 0;
 let hitsLeft = 0;
 
 const animByEnemy = new WeakMap<Enemy, EnemyAnimState>();
 
-// ── вспомогательные состояния
 const nowMs = () =>
   typeof performance !== "undefined" ? performance.now() : Date.now();
 
@@ -198,18 +169,15 @@ function easeOutBack(t: number) {
   return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
 }
 
-/* ─────────────────────────── HP-якорь и всплески ─────────────────────────── */
-
+/* ────────── HP-якорь и всплески ────────── */
 let hpBarY = 0;
 let hpBarSet = false;
 
-// был export function setHpAnchor(x, y)
 export function setHpBarY(y: number) {
   hpBarY = y;
   hpBarSet = true;
 }
 
-/** Красный всплеск на HP */
 type HpImpact = {
   x: number;
   y: number;
@@ -220,7 +188,6 @@ type HpImpact = {
 };
 const hpImpacts: HpImpact[] = [];
 
-/** Вызови каждый кадр ПОСЛЕ drawHpStatus(p, cfg) */
 export function drawHpImpactOverlay(p: p5) {
   const t = nowMs();
   for (let i = hpImpacts.length - 1; i >= 0; --i) {
@@ -240,8 +207,7 @@ export function drawHpImpactOverlay(p: p5) {
   }
 }
 
-/* ────────────────────────── Смещение врага по Y ──────────────────────────── */
-
+/* ────────── Смещение врага по Y ────────── */
 export function getEnemyYOffset(e: Enemy): number {
   return Number((e as any).yOffset ?? 0) || 0;
 }
@@ -249,9 +215,7 @@ function setEnemyYOffset(e: Enemy, yOff: number) {
   (e as any).yOffset = yOff || 0;
 }
 
-/* ───────────────────── Контрудар: очередь и анимация ────────────────────── */
-
-/** Запусти ответки. Правило: "t1" цель; "t2" цель+сосед; "t3" вся линия. */
+/* ────────── Ответ врага: очередь и анимация ────────── */
 export function queueEnemyRetaliationToHp(
   cfg: Cfg,
   target: Enemy,
@@ -261,7 +225,6 @@ export function queueEnemyRetaliationToHp(
 ) {
   if (!cfg?.player || !target || target.hp <= 0) return;
 
-  // выбираем кандидатов
   const row = Number((target as any).row ?? 1);
   let list: Enemy[] = [];
   switch (rule) {
@@ -289,9 +252,8 @@ export function queueEnemyRetaliationToHp(
       );
       break;
   }
-  // не дублировать занятых
-  list = list.filter((e) => !animByEnemy.get(e));
 
+  list = list.filter((e) => !animByEnemy.get(e));
   const rules: any = (cfg as any).rules ?? {};
   const gap = Number(rules.chainGapMs ?? 120);
 
@@ -300,7 +262,6 @@ export function queueEnemyRetaliationToHp(
   });
 }
 
-/** Анимация: опускаем врага до hpAnchor → всплеск → возвращаем обратно */
 function startEnemyDiveToHp(
   cfg: Cfg,
   enemy: Enemy,
@@ -308,9 +269,7 @@ function startEnemyDiveToHp(
 ) {
   if (enemy.hp <= 0 || animByEnemy.get(enemy)) return;
 
-  // Если якорь HP ещё не известен — делаем короткий «кивок» на месте.
   const hasHp = hpBarSet;
-
   const rules: any = (cfg as any).rules ?? {};
   const downMs = hasHp ? Number(rules.outMs ?? 240) : 140;
   const hitMs = Number(rules.hitMs ?? 120);
@@ -353,15 +312,13 @@ function animTickDive(
       return;
     }
 
-    // дошли до HP — удар через «всплеск»
     st.phase = "hit";
     st.t0 = t;
 
-    // красный круг по HP
     if (hpBarSet) {
       const impactX =
         (enemy as any).x ?? getFieldRect().fieldX + getFieldRect().fieldW / 2;
-      const impactY = hpBarSet ? hpBarY : ((enemy as any).y ?? 0) + 26; // fallback, если не успели задать barY
+      const impactY = hpBarSet ? hpBarY : ((enemy as any).y ?? 0) + 26;
       hpImpacts.push({
         x: impactX,
         y: impactY,
@@ -378,9 +335,8 @@ function animTickDive(
 
   if (st.phase === "hit") {
     const k = Math.min(1, (t - st.t0) / st.hitMs);
-    // лёгкое «пружинящее» покачивание обводки (если она у тебя рисуется относительно врага)
-    const outlineKick = Math.sin(k * Math.PI) * 2; // 0..2..0
-    (enemy as any).__outlineKick = outlineKick; // необязательно, но можно учесть в рендере обводки
+    const outlineKick = Math.sin(k * Math.PI) * 2;
+    (enemy as any).__outlineKick = outlineKick;
 
     if (!st.dmgApplied && st.hitMs - (t - st.t0) <= 16) {
       applyEnemyDamageToPlayer(cfg, enemy, ctx);
@@ -400,9 +356,8 @@ function animTickDive(
 
   if (st.phase === "up") {
     const k = Math.min(1, (t - st.t0) / st.upMs);
-    // Возврат с лёгким перелётом
     const back = easeOutBack(k);
-    const y = lerp(st.targetY, st.startY - 6 /* маленький «перелёт» */, back);
+    const y = lerp(st.targetY, st.startY - 6, back);
     setEnemyYOffset(enemy, y - st.startY);
 
     if (k < 1) {
@@ -417,8 +372,7 @@ function animTickDive(
   }
 }
 
-/* ───────────────────────────── Урон игроку ──────────────────────────────── */
-
+/* ────────── Урон игроку (реакция) ────────── */
 function applyEnemyDamageToPlayer(
   cfg: Cfg,
   enemy: Enemy,
@@ -453,8 +407,7 @@ function applyEnemyDamageToPlayer(
   );
 }
 
-/* ───────────────────────────── Мелочи ──────────────────────────────────── */
-
+/* ────────── Вспомогательные типы/функции ────────── */
 function lerp(a: number, b: number, k: number) {
   return a + (b - a) * k;
 }
@@ -466,29 +419,23 @@ type Enemy = {
   element: ElementKey;
   hp: number;
   atk: number;
-  row: number; // 1..rows (индекс линии снизу вверх)
-  col: number; // 0..1 (доля от ширины поля слева→вправо)
+  row: number;
+  col: number;
   x: number;
-  y: number; // абсолютные координаты центра
-  r: number; // радиус круга (px)
-  lineOffset: number; // смещение относительно линии (+вниз, -вверх)
+  y: number;
+  r: number;
+  lineOffset: number;
 };
 
 let enemies: Enemy[] = [];
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   ЗАГРУЗКА И НОРМАЛИЗАЦИЯ КОНФИГА
-   - loadConfig(): fetch → cfg → resetSession()
-   - resetSession(): перенос значений из cfg в runtime-состояние (enemies и пр.)
-   - normalize…(): приводим earth/water и старые ключи, подставляем дефолты поля
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ────────── Загрузка и нормализация конфига ────────── */
 async function loadConfig(url = "/config.json") {
   try {
     const r = await fetch(url, { cache: "no-store" });
     cfg = (await r.json()) as Cfg;
   } catch (e) {
     console.error("config load failed", e);
-    // аварийный дефолт для быстрой проверки сцены
     cfg = {
       field: {
         bg: "#F9EDD6",
@@ -523,31 +470,22 @@ async function loadConfig(url = "/config.json") {
       },
       minions: [],
       weapons: [],
-      elementMatrix: {
-        earth: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
-        fire: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
-        water: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
-        cosmos: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
-        none: { earth: 1.0, fire: 1.0, water: 1.0, cosmos: 1.0, none: 1.0 },
-      },
+      elementMatrix: defaultElementMatrix,
     };
   }
   normalizeConfig();
   resetSession();
 }
 
-// подставляем дефолты для поля и нормализуем элементы
 function normalizeConfig() {
   if (!cfg) return;
 
-  // нормализуем элементы
   cfg.boss.element = toElementKey(cfg.boss.element);
   cfg.minions = cfg.minions.map((m) => ({
     ...m,
     element: toElementKey(m.element),
   }));
 
-  // дефолты для field (без «жёсткой» структуры — оставляем гибкость)
   const f = cfg.field ?? {};
   cfg.field = {
     bg: f.bg ?? "#F9EDD6",
@@ -564,7 +502,7 @@ function normalizeConfig() {
     lineInsetTop: f.lineInsetTop ?? 14,
     lineInsetBottom: f.lineInsetBottom ?? 14,
     lineThickness: f.lineThickness ?? 3,
-    lineStep: f.lineStep, // может быть undefined — тогда авто‑шаг
+    lineStep: f.lineStep,
   };
 }
 
@@ -575,7 +513,6 @@ function resetSession() {
   hitsLeft = cfg.player.hits;
   enemies = [];
 
-  // переносим миньонов из конфига в состояние рендера
   for (const m of cfg.minions) {
     enemies.push({
       id: m.id,
@@ -593,7 +530,6 @@ function resetSession() {
     });
   }
 
-  // добавляем босса
   enemies.push({
     id: 999,
     kind: "boss",
@@ -609,30 +545,22 @@ function resetSession() {
     lineOffset: cfg.boss.lineOffset ?? 0,
   });
 
-  layoutEnemies(); // перевод row/col → абсолютные x,y
-  updateHud(); // обновляем текст в панельке над canvas
+  layoutEnemies();
+  updateHud();
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   ГЕОМЕТРИЯ ПОЛЯ
-   - getFieldRect(): прямоугольник поля внутри canvas (с учётом widthRatio/padding)
-   - getRowYs(): массив Y-координат линий (с lineInsetTop/Bottom и lineStep)
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ────────── Геометрия поля и рендер ────────── */
 function getFieldRect() {
-  // текущий размер canvas (фиксированный; можно вынести в cfg при желании)
   const W = 960,
     H = 540;
-  const f = cfg!.field!; // к этому моменту normalizeConfig уже подставил дефолты
-
+  const f = cfg!.field!;
   const fieldW = Math.floor(W * clamp(f.widthRatio ?? 0.35, 0, 1));
   const fieldH = H - f.padding!.top - f.padding!.bottom;
   const fieldX = Math.floor((W - fieldW) / 2);
   const fieldY = f.padding!.top;
-
   return { fieldX, fieldY, fieldW, fieldH };
 }
 
-// расчёт Y‑координат линий: снизу вверх, равномерно или c явным шагом
 function getRowYs(
   rows: number,
   rect: { fieldX: number; fieldY: number; fieldW: number; fieldH: number },
@@ -642,24 +570,14 @@ function getRowYs(
   const insetBottom = field.lineInsetBottom ?? 14;
   const usableH = rect.fieldH - insetTop - insetBottom;
   const rowsCount = Math.max(2, rows);
-
-  // авто‑шаг (равномерно) и «принудительный» шаг, если задан в конфиге
   const stepAuto = usableH / (rowsCount - 1);
   const step = field.lineStep ? Math.min(field.lineStep, stepAuto) : stepAuto;
-  const y0 = rect.fieldY + rect.fieldH - insetBottom; // нижняя линия
-
+  const y0 = rect.fieldY + rect.fieldH - insetBottom;
   return Array.from({ length: rowsCount }, (_, i) => y0 - i * step);
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   РАЗМЕТКА СУЩЕСТВ (row/col → x,y)
-   - rowIdx → берём Y линии
-   - lineOffset → смещаем сверху/снизу относительно линии
-   - ограничиваем по границам поля (с учётом радиуса)
-   ────────────────────────────────────────────────────────────────────────────── */
 function layoutEnemies() {
   if (!cfg) return;
-
   const rect = getFieldRect();
   const rows = Math.max(2, cfg.field!.rows ?? 5);
   const rowYs = getRowYs(rows, rect, cfg.field!);
@@ -668,8 +586,6 @@ function layoutEnemies() {
   for (const e of enemies) {
     const rowIdx = clamp(e.row, 1, rows) - 1;
     const baseY = rowYs[rowIdx] + (e.lineOffset ?? 0);
-
-    // не вылезаем из прямоугольника поля по Y
     const minY = rect.fieldY + e.r;
     const maxY = rect.fieldY + rect.fieldH - e.r;
     e.x = xAt(e.col);
@@ -677,38 +593,27 @@ function layoutEnemies() {
   }
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   HUD (верхние надписи не на canvas) — краткая служебная инфа
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ────────── HUD ────────── */
 function updateHud() {
   if (!cfg) return;
-
   const hpEl = document.getElementById("hp");
   if (hpEl)
     hpEl.textContent = `HP: ${playerHp}/${cfg.player.hpMax} | Ходы: ${hitsLeft}`;
-
   const ab = document.getElementById("ability");
   if (ab) ab.textContent = `Абилка: ${abilityIdx}`;
-
   const we = document.getElementById("weapon");
   if (we) we.textContent = `Оружие: ${weaponIdx}`;
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   РЕНДЕР ОДНОГО КРУГА: подписи HP/ATK на самом кружке
-   - у босса крупнее шрифт.
-   - белый полу‑прозрачный обводочный контур для читаемости.
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ────────── Рисунок кружка (badge) ────────── */
 function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   const isBoss = e.kind === "boss";
   const hpSize = isBoss ? 36 : 16;
   const atkSize = isBoss ? 18 : 10;
-  const hpDy = isBoss ? -4 : -2; // маленький «центрирующий» сдвиг
+  const hpDy = isBoss ? -4 : -2;
   const atkDy = isBoss ? 22 : 12;
 
   s.textAlign(s.CENTER, s.CENTER);
-
-  // тень под текст (лёгкий чёрный)
   s.noStroke();
   s.fill(0, 140);
   s.textSize(hpSize);
@@ -716,7 +621,6 @@ function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   s.textSize(atkSize);
   s.text(String(e.atk), e.x + 1, e.y + atkDy + 1 + offset);
 
-  // основной слой: чёрный текст с полупрозрачным белым контуром
   s.stroke(255, 255, 255, 150);
   s.strokeWeight(isBoss ? 1.2 : 1.0);
   s.fill(20);
@@ -726,19 +630,12 @@ function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   s.text(String(e.atk), e.x, e.y + atkDy + offset);
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   P5 СЦЕНА: setup/draw/интерактив
-   - рисуем поле, линии и подписи «1..N» слева;
-   - рисуем все круги (с выделением при наведении);
-   - рисуем HP‑линию игрока внизу;
-   - лёгкая «болтанка» оружия как плейсхолдер.
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ────────── Сцена p5 ────────── */
 const selectedIcons: Record<number, p5.Image> = {};
 
 const sketch = (s: p5) => {
   const W = 960,
     H = 1400;
-  let t = 0;
   let hoveredId: number | null = null;
 
   function preloadWeaponSelected(p: p5) {
@@ -755,12 +652,10 @@ const sketch = (s: p5) => {
     preloadWeaponSelected(s);
     preloadElementSchema(s);
     initGameLogger();
-    console.info("Game logger initialized");
   };
 
   s.draw = () => {
     s.background(24);
-
     if (!cfg) {
       s.fill(200);
       s.textAlign(s.CENTER, s.CENTER);
@@ -776,12 +671,10 @@ const sketch = (s: p5) => {
       cfg.field!
     );
 
-    // фон поля
     s.noStroke();
     s.fill(cfg.field!.bg!);
     s.rect(fieldX, fieldY, fieldW, fieldH, 0);
 
-    // горизонтальные линии + цифры слева
     s.stroke(cfg.field!.line!);
     s.strokeWeight(cfg.field!.lineThickness ?? 3);
     s.textAlign(s.RIGHT, s.CENTER);
@@ -794,14 +687,11 @@ const sketch = (s: p5) => {
       s.text(String(r), fieldX - 8, y);
     }
 
-    // КРУГИ
     for (const e of enemies) {
-      // сам круг
       s.noStroke();
       s.fill(ELEMENT_COLOR[e.element]);
       s.circle(e.x, e.y + getEnemyYOffset(e), e.r * 2);
 
-      // подсветка наведённого круга (серое + белое полупрозрачное кольцо)
       if (hoveredId === e.id) {
         s.noFill();
         s.stroke(100);
@@ -810,7 +700,6 @@ const sketch = (s: p5) => {
         s.noStroke();
       }
 
-      // подписи HP/ATK
       drawEnemyBadge(s, e, getEnemyYOffset(e));
     }
 
@@ -822,25 +711,15 @@ const sketch = (s: p5) => {
       hp: cfg.player.hp,
       hpMax: cfg.player.hpMax,
     });
-    // один раз на старте кадра (или при изменении лэйаута) укажи якорь HP
-    // например, центр полоски HP:
     setHpBarY(barY);
     drawHpImpactOverlay(s);
 
-    barY = barY + 60; // чуть ниже полоски HP
+    barY = barY + 60;
 
-    //const weaponW = Math.floor(fieldW * 0.7);
-    //const weaponX = fieldX + (fieldW - weaponW) / 2;
     drawWeaponPanel(
       s,
-      {
-        weapons: getWeapons(cfg),
-        selectedId: getSelectedWeapon()?.id ?? 1,
-      },
-      {
-        x: fieldX + 12,
-        y: barY,
-      }
+      { weapons: getWeapons(cfg), selectedId: getSelectedWeapon()?.id ?? 1 },
+      { x: fieldX + 12, y: barY }
     );
 
     drawSelectedWeaponIcon(s, fieldX, weaponY);
@@ -881,15 +760,10 @@ const sketch = (s: p5) => {
 
     barY += 130;
 
-    if (cfg.elementMatrix) {
+    if (cfg.elementMatrix)
       drawElementSchema(s, fieldX, barY, fieldW, cfg.elementMatrix);
-    }
-    //updateRetaliationAnimations(cfg, s);
   };
 
-  // ответы врага
-
-  // наведение мыши — для подсветки круга
   s.mouseMoved = () => {
     hoveredId = null;
     for (const e of enemies) {
@@ -900,29 +774,6 @@ const sketch = (s: p5) => {
       }
     }
   };
-
-  // ─── ЛОГ ВЫБОРА (оружие/точечная/супер) ──────────────────────────────────────
-  function logAbilityChoice(player: PlayerCfg, weapon: WeaponCfg) {
-    const superId = getSelectedAbility(); // "ab5"|"ab6"|"ab7"|"ab8"| "ab0" | null
-    const pointEl = getActiveElementFromPointAbility(); // "earth"|"fire"|"water"|"cosmos"|"none"
-    const rule = weapon.retaliationRule ?? "t1";
-
-    console.log(
-      [
-        "=== CHOICE ===",
-        `Super: ${String(superId)}`,
-        `PointEl: ${pointEl}`,
-        `Weapon: id=${weapon.id}, rule=${rule}`,
-        `Player atk=${player.attack.min}-${player.attack.max}, luck=${
-          player.luck ?? 0
-        }`,
-      ].join(" | ")
-    );
-  }
-
-  function clamp01(x: number) {
-    return Math.max(0, Math.min(1, x));
-  }
 
   function spendTurns(n: number) {
     // @ts-ignore
@@ -937,22 +788,20 @@ const sketch = (s: p5) => {
   function abilityPctFor(player: PlayerCfg, el: ElementKey) {
     if (el === "none") return 1;
     let v = player.elements?.[el] ?? 1;
-    if (v > 1.001) v /= 100; // поддержка «84» → 0.84
+    if (v > 1.001) v /= 100;
     return v;
   }
 
-  // единичный «удар» по одной цели, без лишней магии
   function computeSingleHit(
     player: PlayerCfg,
     weapon: WeaponCfg,
     target: Enemy,
     matrix: ElementMatrixCfg | undefined,
-    element: ElementKey, // "none" для физики
-    coefMul = 1.0, // например ослабление второго удара
-    skipMatrix = false // если вдруг нужно выключить матрицу
+    element: ElementKey,
+    coefMul = 1.0,
+    skipMatrix = false
   ) {
     const luck = player.luck ?? 0;
-
     const pct = abilityPctFor(player, element);
     const pureMin = Math.floor(player.attack.min * pct);
     const pureMax = Math.floor(player.attack.max * pct);
@@ -989,22 +838,6 @@ const sketch = (s: p5) => {
     return { finalDamage };
   }
 
-  // ─── ЕДИНАЯ ТОЧКА ВХОДА ДЛЯ ХИТА ─────────────────────────────────────────────
-  /**
-   * Универсальный удар.
-   * ability:
-   *  - "ab0"           → обычный (физика)
-   *  - "point"         → точечный (обязателен opts.element)
-   *  - "ab5"|"ab6"|"ab7" → супер-удары (стихия зашита: fire/earth/water)
-   *  - "ab8"           → смена стихии (урон 0, нужно opts.element или циклим)
-   *
-   * opts:
-   *  - element?: ElementKey         — активная стихия (для "point" и "ab8")
-   *  - secondCoef?: number          — ослабление второго удара (по умолчанию 1)
-   *  - ab8Cost?: number             — стоимость ходов для ab8 (по умолчанию 2)
-   *  - cycleOrder?: ElementKey[]    — порядок для ab8, если element не задан
-   */
-
   function performHit(
     player: PlayerCfg,
     weapon: WeaponCfg,
@@ -1018,19 +851,16 @@ const sketch = (s: p5) => {
       cycleOrder?: ElementKey[];
     } = {}
   ) {
-    // Проверка на живую цель
     if (target.hp <= 0) {
       console.log(`Цель #${target.id} уже мертва`);
       return { type: "skip", reason: "target_dead" };
     }
 
-    // Безопасная матрица
     const M: ElementMatrixCfg =
       elementMatrix ??
       (cfg?.elementMatrix as ElementMatrixCfg) ??
       defaultElementMatrix;
 
-    // ── AB8: смена стихии (урон 0)
     if (ability === "ab8") {
       const ORDER = opts.cycleOrder ?? ["earth", "fire", "water", "cosmos"];
       const fromEl = target.element;
@@ -1042,7 +872,6 @@ const sketch = (s: p5) => {
         const nextIdx = (idx >= 0 ? idx + 1 : 0) % ORDER.length;
         toEl = ORDER[nextIdx] as ElementKey;
       }
-
       target.element = toEl;
       const cost = opts.ab8Cost ?? 2;
       spendTurns(cost);
@@ -1052,20 +881,14 @@ const sketch = (s: p5) => {
       return { type: "ab8", from: fromEl, to: toEl, cost };
     }
 
-    // ── Супер-удары с потенциальной второй целью
     if (ability === "ab5" || ability === "ab6" || ability === "ab7") {
-      // зашитая стихия
       const superEl: ElementKey =
         ability === "ab5" ? "fire" : ability === "ab6" ? "earth" : "water";
-
       const results: number[] = [];
-
-      // главная цель
       const r1 = computeSingleHit(player, weapon, target, M, superEl);
       applyDamage(target, r1.finalDamage);
       results.push(r1.finalDamage);
 
-      // определяем вторую цель по правилу
       let second: Enemy | null = null;
       if (ability === "ab5") {
         const cand = enemies.filter((e) => e.id !== target.id && e.hp > 0);
@@ -1084,7 +907,6 @@ const sketch = (s: p5) => {
         );
         second = same[0] ?? null;
       } else {
-        // ab7
         const forward = enemies
           .filter(
             (e) =>
@@ -1098,7 +920,7 @@ const sketch = (s: p5) => {
       }
 
       if (second) {
-        const coefMul = opts.secondCoef ?? 1.0; // можно передать <1, чтобы ослабить
+        const coefMul = opts.secondCoef ?? 1.0;
         const r2 = computeSingleHit(
           player,
           weapon,
@@ -1119,7 +941,6 @@ const sketch = (s: p5) => {
       return { type: ability, total, count: results.length };
     }
 
-    // ── Точечный (обязателен opts.element) / Обычный
     if (ability === "point") {
       const el = opts.element ?? "none";
       const r = computeSingleHit(player, weapon, target, M, el);
@@ -1128,7 +949,6 @@ const sketch = (s: p5) => {
       console.log(`POINT ${el}: dmg=${r.finalDamage} | ходы=-1`);
       return { type: "point", element: el, damage: r.finalDamage };
     } else {
-      // "ab0"
       const r = computeSingleHit(player, weapon, target, M, "none");
       applyDamage(target, r.finalDamage);
       spendTurns(1);
@@ -1137,63 +957,10 @@ const sketch = (s: p5) => {
     }
   }
 
-  // ─── Задел под ответ врага ───────────────────────────────────────────────────
-
-  // ─── Helper: базовый удар (AB0) без стихий ───────────────────────────────────
-  function doBasicHit(player: PlayerCfg, weapon: WeaponCfg, enemy: Enemy) {
-    const baseMin = player.attack.min;
-    const baseMax = player.attack.max;
-    const luck = player.luck ?? 0;
-
-    // Окно урона без стихий
-    const pureMin = baseMin;
-    const pureMax = baseMax;
-
-    // Промах и крит (как в формуле)
-    const posIdx = Math.max(1, Math.min(4, enemy.row));
-    const { missPct } = getMissForWeapon(weapon, posIdx, luck);
-    const critPct = Math.floor(luck / 10);
-
-    // Статический лог (как в DebugStats...):
-    const staticLine = [
-      "=== Подробный расчёт удара (AB0) ===",
-      `Цель: #${enemy.id} (${enemy.kind}) elem=${enemy.element} row=${enemy.row}`,
-      `Оружие: ${weapon.name} (id=${weapon.id})`,
-      `База игрока: ${baseMin}-${baseMax}`,
-      `Удача: ${luck} ⇒ крит=${critPct}%`,
-      `Без стихий (coef=1): ${pureMin}-${pureMax}`,
-      `Промах(pos=${posIdx}): ${missPct.toFixed(1)}%`,
-    ].join(" | ");
-    if (staticLine !== lastEnemyDebugStatic) {
-      console.log(staticLine);
-      lastEnemyDebugStatic = staticLine;
-    }
-
-    // Итог клика
-    const baseRoll = rollByLuck(pureMin, pureMax, luck);
-    const { didCrit, critMul } = getCritFromLuck(luck);
-    const rolled = Math.round(baseRoll * critMul);
-
-    const { didMiss } = getMissForWeapon(weapon, posIdx, luck);
-    const finalDamage = didMiss ? 0 : rolled;
-    const outcome = didMiss ? "МИМО" : "ПОПАЛ";
-    const critTag = didCrit ? "КРИТ×2" : "без крита";
-
-    console.log(
-      `Ролл: base=${baseRoll} | ${critTag} | по цели=${rolled} | результат: ${outcome} (${finalDamage})`
-    );
-
-    return { finalDamage };
-  }
-
-  // ─── Клик мыши ────────────────────────────────────────────────────────────────
   s.mousePressed = () => {
-    // 1) Панель оружия
     const pickedWeaponId = handleWeaponClick(s.mouseX, s.mouseY);
     if (pickedWeaponId !== null) {
       selectedWeaponId = pickedWeaponId;
-      console.log("Выбрано оружие с ID:", pickedWeaponId);
-
       const rule = getSelectedWeaponCfg()?.retaliationRule ?? "t1";
       const curSuper = getSelectedAbility();
       if (
@@ -1206,23 +973,18 @@ const sketch = (s: p5) => {
       return;
     }
 
-    // 2) Панель точечного удара
     const pickedPoint = handlePointAbilityClick(s.mouseX, s.mouseY);
     if (pickedPoint) {
       setSelectedAbility(null);
-      console.log("Точечный удар:", pickedPoint);
       return;
     }
 
-    // 3) Панель суперударов
     const pickedSuper = handleAbilityClick(s.mouseX, s.mouseY);
     if (pickedSuper) {
       setSelectedPointAbility("off");
-      console.log("Суперудар:", pickedSuper);
       return;
     }
 
-    // 4) Клик по врагу → единый ХИТ
     if (!hoveredId) return;
     const enemy = enemies.find((e) => e.id === hoveredId);
     if (!enemy || !cfg) return;
@@ -1230,18 +992,15 @@ const sketch = (s: p5) => {
     const weapon = getSelectedWeaponCfg() ?? cfg.weapons?.[0] ?? null;
     if (!weapon) return;
 
-    const superId = getSelectedAbility(); // "ab5"|"ab6"|"ab7"|"ab8"|"ab0"|null
-    const pointEl = getActiveElementFromPointAbility(); // "earth"|"fire"|"water"|"cosmos"|"none"
+    const superId = getSelectedAbility();
+    const pointEl = getActiveElementFromPointAbility();
     const elementMatrix = cfg?.elementMatrix || defaultElementMatrix;
 
-    // Определяем тип атаки
     let abilityType: "ab0" | "point" | "ab5" | "ab6" | "ab7" | "ab8";
     let options: any = {};
 
     if (superId && superId !== "ab0") {
       abilityType = superId as "ab5" | "ab6" | "ab7" | "ab8";
-
-      // Для AB8 может потребоваться элемент
       if (abilityType === "ab8" && pointEl !== "none") {
         options.element = pointEl;
       }
@@ -1252,7 +1011,6 @@ const sketch = (s: p5) => {
       abilityType = "ab0";
     }
 
-    // Выполняем удар
     const result = performHit(
       cfg.player,
       weapon,
@@ -1262,7 +1020,6 @@ const sketch = (s: p5) => {
       options
     );
 
-    // Ответ врага
     if (
       result &&
       typeof result === "object" &&
@@ -1278,39 +1035,27 @@ const sketch = (s: p5) => {
       );
     }
 
-    // Обрабатываем результат
     console.log("Результат удара:", result);
-
-    // Обновляем отображение
     updateHud();
   };
 };
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   ЗАПУСК СЦЕНЫ + UI‑события
-   - загружаем config.json;
-   - создаём canvas;
-   - подписываемся на кнопки: restart и загрузка произвольного конф. файла.
-   ────────────────────────────────────────────────────────────────────────────── */
+/* ────────── Инициация сцены и UI события ────────── */
 (async () => {
   await loadConfig();
   new p5(sketch);
 
-  // «Обновить сессию» — перечитываем cfg из памяти
   document
     .getElementById("restart")
     ?.addEventListener("click", () => resetSession());
 
-  // Загрузка произвольного config.json через <input type="file">
   const fileInput = document.getElementById("file") as HTMLInputElement | null;
   fileInput?.addEventListener("change", (ev) => {
     const input = ev.target as HTMLInputElement;
     if (!input.files || !input.files[0]) return;
-
     input.files[0].text().then((txt) => {
       cfg = JSON.parse(txt) as Cfg;
       normalizeConfig();
-      console.log("CFG luck =", cfg.player.luck);
       resetSession();
     });
   });
@@ -1323,19 +1068,14 @@ function getSelectedWeaponCfg(): WeaponCfg | null {
 
 function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
   if (!cfg?.weapons || !cfg.weapons.length) return;
-
   const weapon =
     cfg.weapons.find((w) => w.id === selectedWeaponId) ?? cfg.weapons[0];
   if (!weapon) return;
-
-  // Плавающая иконка (лёгкая анимация)
   const dy = Math.sin(p.frameCount / 10) * 1.5;
   const img = selectedIcons[weapon.id];
   p.image(img, x + 260, y - 40 + dy, 64, 120);
 
-  // Урон
-  // Чистый урон (точечный удар стихией или off)
-  const selectedEl = getActiveElementFromPointAbility(); // <-- из новой панели точечного удара
+  const selectedEl = getActiveElementFromPointAbility();
   const dbg = DebugStatsPlayerDamage(cfg.player, selectedEl);
   p.fill(0);
   p.textSize(14);
@@ -1343,27 +1083,10 @@ function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
   p.text(`${dbg.min} – ${dbg.max}`, x + 270, y + size / 2 - 8 + 55);
 }
 
-// main.ts
-// ─── Игрок: компактный анти‑спам лог ──────────────────────────────────────────
+/* ────────── Debug: чистый min/max по выбранной стихии ────────── */
 let lastPlayerDebugLine = "";
-
-// Порядок стихий как в проекте:
 const ELEMENTS_4: ElementKey[] = ["earth", "fire", "water", "cosmos"];
 
-/**
- * DebugStatsPlayerDamage — считает «чистый» мин/макс для выбранной абилки,
- * и одновременно готовит ОДНУ строку с диапазонами по КАЖДОЙ стихии (без матрицы).
- * Никаких коэффициентов врага тут нет — это лог ИГРОКА.
- *
- * Формулы:
- * baseMin..baseMax = player.attack.min..max (из config.json)
- * abilityPct = player.elements[selectedElement] (0..1)
- * pure(min/max) = base(min/max) * abilityPct
- * critChance = luck/10 % (из ТЗ)
- *
- * Возвращает «чистый» диапазон для выбранной абилки (для вывода под оружием).
- * В консоль печатает ОДНУ строку, если что‑то изменилось.
- */
 function DebugStatsPlayerDamage(
   player: PlayerCfg,
   selectedElement: ElementKey
@@ -1371,14 +1094,12 @@ function DebugStatsPlayerDamage(
   const atkMin = player.attack.min;
   const atkMax = player.attack.max;
   const luck = player.luck ?? 0;
-  const critChancePct = luck / 10; // каждые 10 удачи = +1% крита (из ТЗ)
+  const critChancePct = luck / 10;
 
-  // Чистый диапазон для выбранной абилки (без матрицы)
   const abilityPctSel = player.elements?.[selectedElement] ?? 1;
   const pureMinSel = Math.floor(atkMin * abilityPctSel);
   const pureMaxSel = Math.floor(atkMax * abilityPctSel);
 
-  // Чистые диапазоны по всем 4 стихиям (без матрицы) — для лога
   const parts: string[] = [];
   for (const el of ELEMENTS_4) {
     const pct = player.elements?.[el] ?? 1;
@@ -1394,7 +1115,6 @@ function DebugStatsPlayerDamage(
   )}%) | + pure=${pureMinSel}-${pureMaxSel} | ALL[ ${parts.join(" | ")} ]`;
 
   if (line !== lastPlayerDebugLine) {
-    // console.clear(); // при желании можно чистить, чтобы была только актуальная строка
     console.log(line);
     lastPlayerDebugLine = line;
   }
@@ -1402,23 +1122,20 @@ function DebugStatsPlayerDamage(
   return { min: pureMinSel, max: pureMaxSel };
 }
 
-// ─── Luck / Crit / Miss helpers ──────────────────────────────────────────────
-// смещение ролла к максимуму: удача 0..100 → экспонента 1..0.3
+/* ────────── Luck / Crit / Miss / Elem helpers ────────── */
 function rollByLuck(minVal: number, maxVal: number, luck: number): number {
   const L = Math.max(0, Math.min(1, luck / 100));
-  const exp = Math.max(0.3, 1 - 0.7 * L); // больше удачи → сильнее «прижатие» к max
-  const u = Math.random() ** exp; // смещённое равномерное 0..1
+  const exp = Math.max(0.3, 1 - 0.7 * L);
+  const u = Math.random() ** exp;
   return Math.round(minVal + (maxVal - minVal) * u);
 }
 
-// шанс крита: ⌊luck/10⌋ %, множитель ×2 (из таблицы переменных)
 function getCritFromLuck(luck: number) {
   const pct = Math.floor(luck / 10);
   const did = Math.random() * 100 < pct;
   return { critPct: pct, didCrit: did, critMul: did ? 2 : 1 };
 }
 
-// шанс промаха по оружию и позиции с учётом удачи (конфиг weapons.miss)
 function getMissForWeapon(weapon: WeaponCfg, pos1to4: number, luck: number) {
   const base =
     weapon.miss?.baseByPos?.[Math.max(1, Math.min(4, pos1to4)) - 1] ?? 0;
@@ -1430,7 +1147,6 @@ function getMissForWeapon(weapon: WeaponCfg, pos1to4: number, luck: number) {
   return { missPct, didMiss };
 }
 
-// элементный коэффициент attacker→defender (дефолт 1.0)
 function getElemCoef(
   matrix: ElementMatrixCfg | undefined,
   atk: ElementKey,
@@ -1439,6 +1155,3 @@ function getElemCoef(
   const M = matrix ?? defaultElementMatrix;
   return M[atk]?.[def] ?? 1.0;
 }
-
-// ─── Подробный лог урона по врагу ────────────────────────────────────────────
-let lastEnemyDebugStatic = "";
