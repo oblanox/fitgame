@@ -1,4 +1,7 @@
-﻿import p5 from "p5";
+﻿// src/main.ts
+import p5 from "p5";
+
+/* UI-модули (оставляем как есть) */
 import { drawHpStatus } from "./ui/hp_status";
 import {
   drawWeaponPanel,
@@ -26,10 +29,23 @@ import {
 } from "./ui/abilities";
 import { initGameLogger, drawLogPanel } from "./ui/log_panel";
 
-/* ────────────── Основные типы и константы ────────────── */
-type ElementKey = "earth" | "fire" | "water" | "cosmos" | "none";
-type AttackKey = "min" | "max";
+/* Импорты из вынесённых файлов */
+import {
+  setHpBarY,
+  drawHpImpactOverlay,
+  getEnemyYOffset,
+  queueEnemyRetaliationToHp,
+} from "./animations";
+import {
+  Cfg,
+  Enemy,
+  ElementKey,
+  ElementMatrixCfg,
+  PlayerCfg,
+  WeaponCfg,
+} from "./types";
 
+/* ────────────── Константы / хелперы ────────────── */
 const ELEMENT_COLOR: Record<ElementKey, string> = {
   earth: "#129447",
   fire: "#E53935",
@@ -51,70 +67,26 @@ function toElementKey(s: string): ElementKey {
   const k = (s ?? "").toLowerCase();
   return ELEMENT_ALIAS[k] ?? "earth";
 }
-
 const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
+function lerp(a: number, b: number, k: number) {
+  return a + (b - a) * k;
+}
 
-type Padding = { left: number; right: number; top: number; bottom: number };
+/* ────────────── Состояние игры (UI/логика в main) ────────────── */
+let cfg: Cfg | null = null;
+let selectedWeaponId = 1;
+let hitsLeft = 0;
+let playerHp = 0;
 
-type FieldCfg = {
-  bg?: string;
-  line?: string;
-  rows?: number;
-  widthRatio?: number;
-  padding?: Padding;
-  lineInsetTop?: number;
-  lineInsetBottom?: number;
-  lineThickness?: number;
-  lineStep?: number;
-};
+let enemies: Enemy[] = [];
 
-type PlayerCfg = {
-  hpMax: number;
-  hp: number;
-  hits: number;
-  luck: number;
-  def: number;
-  maxHits: number;
-  elements?: Partial<Record<ElementKey, number>>;
-  attack: Record<AttackKey, number>;
-};
+/* Вспомогательные: анимации используют getEnemyYOffset() из animations.ts */
+function setEnemyYOffsetLocal(e: Enemy, off: number) {
+  // оставляем, если в проекте где-то напрямую меняется поле yOffset
+  (e as any).yOffset = off;
+}
 
-type BossCfg = {
-  type: number;
-  element: string;
-  hp: number;
-  atk: number;
-  row?: number;
-  col?: number;
-  radius?: number;
-  lineOffset?: number;
-};
-
-type MinionCfg = {
-  id: number;
-  type: number;
-  element: string;
-  hp: number;
-  atk: number;
-  row?: number;
-  col?: number;
-  radius?: number;
-  lineOffset?: number;
-};
-
-type WeaponCfg = {
-  id: number;
-  name: string;
-  miss: {
-    baseByPos: number[];
-    luckStep: number;
-    luckPerStepPct: number;
-  };
-  retaliationRule: "t1" | "t2" | "t3";
-};
-
-type ElementMatrixCfg = Record<ElementKey, Record<ElementKey, number>>;
-
+/* ────────────── Конфиг/инициализация ────────────── */
 const defaultElementMatrix: ElementMatrixCfg = {
   earth: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
   fire: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
@@ -123,319 +95,12 @@ const defaultElementMatrix: ElementMatrixCfg = {
   none: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
 };
 
-type Cfg = {
-  field?: FieldCfg;
-  player: PlayerCfg;
-  boss: BossCfg;
-  minions: MinionCfg[];
-  weapons: WeaponCfg[];
-  elementMatrix?: ElementMatrixCfg;
-};
-
-/* ────────────── Анимация ответки врага ────────────── */
-type RetaliationRule = "t1" | "t2" | "t3";
-type EnemyAnimState = {
-  phase: "down" | "hit" | "up";
-  t0: number;
-  downMs: number;
-  hitMs: number;
-  upMs: number;
-  startY: number;
-  targetY: number;
-  dmgApplied: boolean;
-};
-
-/* ────────────── Состояние визуализации ────────────── */
-let cfg: Cfg | null = null;
-let selectedWeaponId = 1;
-const abilityIdx = 1;
-const weaponIdx = 1;
-let playerHp = 0;
-let hitsLeft = 0;
-
-const animByEnemy = new WeakMap<Enemy, EnemyAnimState>();
-
-const nowMs = () =>
-  typeof performance !== "undefined" ? performance.now() : Date.now();
-
-function easeInOutQuad(t: number) {
-  t = Math.max(0, Math.min(1, t));
-  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-}
-function easeOutBack(t: number) {
-  t = Math.max(0, Math.min(1, t));
-  const c1 = 1.70158,
-    c3 = c1 + 1;
-  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-}
-
-/* ────────── HP-якорь и всплески ────────── */
-let hpBarY = 0;
-let hpBarSet = false;
-
-export function setHpBarY(y: number) {
-  hpBarY = y;
-  hpBarSet = true;
-}
-
-type HpImpact = {
-  x: number;
-  y: number;
-  r0: number;
-  r1: number;
-  t0: number;
-  ms: number;
-};
-const hpImpacts: HpImpact[] = [];
-
-export function drawHpImpactOverlay(p: p5) {
-  const t = nowMs();
-  for (let i = hpImpacts.length - 1; i >= 0; --i) {
-    const it = hpImpacts[i];
-    const k = Math.min(1, (t - it.t0) / it.ms);
-    const r = it.r0 + (it.r1 - it.r0) * easeOutBack(k);
-    const a = 1 - k;
-
-    p.push();
-    p.noFill();
-    p.stroke(255, 0, 0, 255 * a);
-    p.strokeWeight(3);
-    p.circle(it.x, it.y, r * 2);
-    p.pop();
-
-    if (k >= 1) hpImpacts.splice(i, 1);
-  }
-}
-
-/* ────────── Смещение врага по Y ────────── */
-export function getEnemyYOffset(e: Enemy): number {
-  return Number((e as any).yOffset ?? 0) || 0;
-}
-function setEnemyYOffset(e: Enemy, yOff: number) {
-  (e as any).yOffset = yOff || 0;
-}
-
-/* ────────── Ответ врага: очередь и анимация ────────── */
-export function queueEnemyRetaliationToHp(
-  cfg: Cfg,
-  target: Enemy,
-  all: Enemy[],
-  ctx: { reason: string; totalDamage?: number },
-  rule: RetaliationRule = "t1"
-) {
-  if (!cfg?.player || !target || target.hp <= 0) return;
-
-  const row = Number((target as any).row ?? 1);
-  let list: Enemy[] = [];
-  switch (rule) {
-    case "t1":
-      list = [target];
-      break;
-    case "t2": {
-      list = [target];
-      const sameRow = all
-        .filter(
-          (e) =>
-            e !== target && e.hp > 0 && Number((e as any).row ?? row) === row
-        )
-        .sort(
-          (a, b) =>
-            Math.abs((a as any).col - (target as any).col) -
-            Math.abs((b as any).col - (target as any).col)
-        );
-      if (sameRow[0]) list.push(sameRow[0]);
-      break;
-    }
-    case "t3":
-      list = all.filter(
-        (e) => e.hp > 0 && Number((e as any).row ?? row) === row
-      );
-      break;
-  }
-
-  list = list.filter((e) => !animByEnemy.get(e));
-  const rules: any = (cfg as any).rules ?? {};
-  const gap = Number(rules.chainGapMs ?? 120);
-
-  list.forEach((e, i) => {
-    setTimeout(() => startEnemyDiveToHp(cfg, e, ctx), i * gap);
-  });
-}
-
-function startEnemyDiveToHp(
-  cfg: Cfg,
-  enemy: Enemy,
-  ctx: { reason: string; totalDamage?: number }
-) {
-  if (enemy.hp <= 0 || animByEnemy.get(enemy)) return;
-
-  const hasHp = hpBarSet;
-  const rules: any = (cfg as any).rules ?? {};
-  const downMs = hasHp ? Number(rules.outMs ?? 240) : 140;
-  const hitMs = Number(rules.hitMs ?? 120);
-  const upMs = hasHp ? Number(rules.backMs ?? 260) : 160;
-
-  const startY = Number((enemy as any).y ?? 0);
-  const targetY = hpBarSet ? hpBarY : startY + Number(rules.dropPx ?? 26);
-
-  const st: EnemyAnimState = {
-    phase: "down",
-    t0: nowMs(),
-    downMs,
-    hitMs,
-    upMs,
-    startY,
-    targetY,
-    dmgApplied: false,
-  };
-  animByEnemy.set(enemy, st);
-  requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
-}
-
-function animTickDive(
-  cfg: Cfg,
-  enemy: Enemy,
-  ctx: { reason: string; totalDamage?: number }
-) {
-  const st = animByEnemy.get(enemy);
-  if (!st) return;
-
-  const t = nowMs();
-
-  if (st.phase === "down") {
-    const k = Math.min(1, (t - st.t0) / st.downMs);
-    const y = lerp(st.startY, st.targetY, easeInOutQuad(k));
-    setEnemyYOffset(enemy, y - st.startY);
-
-    if (k < 1) {
-      requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
-      return;
-    }
-
-    st.phase = "hit";
-    st.t0 = t;
-
-    if (hpBarSet) {
-      const impactX =
-        (enemy as any).x ?? getFieldRect().fieldX + getFieldRect().fieldW / 2;
-      const impactY = hpBarSet ? hpBarY : ((enemy as any).y ?? 0) + 26;
-      hpImpacts.push({
-        x: impactX,
-        y: impactY,
-        r0: 6,
-        r1: 36,
-        t0: t,
-        ms: Math.max(220, st.hitMs + 80),
-      });
-    }
-
-    requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
-    return;
-  }
-
-  if (st.phase === "hit") {
-    const k = Math.min(1, (t - st.t0) / st.hitMs);
-    const outlineKick = Math.sin(k * Math.PI) * 2;
-    (enemy as any).__outlineKick = outlineKick;
-
-    if (!st.dmgApplied && st.hitMs - (t - st.t0) <= 16) {
-      applyEnemyDamageToPlayer(cfg, enemy, ctx);
-      st.dmgApplied = true;
-    }
-
-    if (k < 1) {
-      requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
-      return;
-    }
-
-    st.phase = "up";
-    st.t0 = t;
-    requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
-    return;
-  }
-
-  if (st.phase === "up") {
-    const k = Math.min(1, (t - st.t0) / st.upMs);
-    const back = easeOutBack(k);
-    const y = lerp(st.targetY, st.startY - 6, back);
-    setEnemyYOffset(enemy, y - st.startY);
-
-    if (k < 1) {
-      requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
-      return;
-    }
-
-    setEnemyYOffset(enemy, 0);
-    (enemy as any).__outlineKick = 0;
-    animByEnemy.delete(enemy);
-    return;
-  }
-}
-
-/* ────────── Урон игроку (реакция) ────────── */
-function applyEnemyDamageToPlayer(
-  cfg: Cfg,
-  enemy: Enemy,
-  ctx: { reason: string; totalDamage?: number }
-) {
-  if (!cfg?.player) return;
-
-  const rules: any = (cfg as any).rules ?? {};
-  const base = Number((enemy as any).atk ?? 6);
-  const isBoss = (enemy as any).kind === "boss";
-  const mul = isBoss
-    ? Number(rules.bossRetaliationMul ?? 0.75)
-    : Number(rules.retaliationMul ?? 0.5);
-  const reactive = ctx.totalDamage
-    ? Math.min(1.5, 0.3 + ctx.totalDamage / 100)
-    : 1;
-
-  let dmg = Math.max(1, Math.round(base * mul * reactive));
-  const def = Number((cfg.player as any).defense ?? 0);
-  dmg = Math.max(0, dmg - def);
-
-  const prev = Number((cfg.player as any).hp ?? 0);
-  (cfg.player as any).hp = Math.max(0, prev - dmg);
-
-  try {
-    (cfg.player as any).onDamaged?.(dmg, enemy, ctx.reason);
-  } catch {}
-  console.log(
-    `[retaliation→HP] enemy=${(enemy as any).id ?? "?"} dmg=${dmg} reason=${
-      ctx.reason
-    }`
-  );
-}
-
-/* ────────── Вспомогательные типы/функции ────────── */
-function lerp(a: number, b: number, k: number) {
-  return a + (b - a) * k;
-}
-
-type Enemy = {
-  id: number;
-  kind: "minion" | "boss";
-  type: number;
-  element: ElementKey;
-  hp: number;
-  atk: number;
-  row: number;
-  col: number;
-  x: number;
-  y: number;
-  r: number;
-  lineOffset: number;
-};
-
-let enemies: Enemy[] = [];
-
-/* ────────── Загрузка и нормализация конфига ────────── */
 async function loadConfig(url = "/config.json") {
   try {
     const r = await fetch(url, { cache: "no-store" });
     cfg = (await r.json()) as Cfg;
   } catch (e) {
-    console.error("config load failed", e);
+    console.error("config load failed, using fallback", e);
     cfg = {
       field: {
         bg: "#F9EDD6",
@@ -446,7 +111,6 @@ async function loadConfig(url = "/config.json") {
         lineInsetTop: 14,
         lineInsetBottom: 14,
         lineThickness: 3,
-        lineStep: 68,
       },
       player: {
         hpMax: 2200,
@@ -467,7 +131,7 @@ async function loadConfig(url = "/config.json") {
         col: 0.5,
         radius: 80,
         lineOffset: 10,
-      },
+      } as any,
       minions: [],
       weapons: [],
       elementMatrix: defaultElementMatrix,
@@ -479,45 +143,27 @@ async function loadConfig(url = "/config.json") {
 
 function normalizeConfig() {
   if (!cfg) return;
-
-  cfg.boss.element = toElementKey(cfg.boss.element);
-  cfg.minions = cfg.minions.map((m) => ({
+  cfg.boss.element = toElementKey(cfg.boss.element as string);
+  cfg.minions = (cfg.minions || []).map((m) => ({
     ...m,
-    element: toElementKey(m.element),
+    element: toElementKey(m.element as string),
   }));
-
-  const f = cfg.field ?? {};
-  cfg.field = {
-    bg: f.bg ?? "#F9EDD6",
-    line: f.line ?? "#B0846A",
-    rows: f.rows ?? 4,
-    widthRatio: f.widthRatio ?? 0.35,
-    padding: {
-      left: 80,
-      right: 40,
-      top: 40,
-      bottom: 120,
-      ...(f.padding ?? {}),
-    },
-    lineInsetTop: f.lineInsetTop ?? 14,
-    lineInsetBottom: f.lineInsetBottom ?? 14,
-    lineThickness: f.lineThickness ?? 3,
-    lineStep: f.lineStep,
-  };
+  cfg.field = cfg.field ?? {};
+  cfg.elementMatrix = cfg.elementMatrix ?? defaultElementMatrix;
 }
 
 function resetSession() {
   if (!cfg) return;
-
   playerHp = cfg.player.hp;
   hitsLeft = cfg.player.hits;
   enemies = [];
 
-  for (const m of cfg.minions) {
+  for (const m of cfg.minions || []) {
     enemies.push({
       id: m.id,
       kind: "minion",
-      element: toElementKey(m.element),
+      type: m.type,
+      element: toElementKey(m.element as any),
       hp: m.hp,
       atk: m.atk,
       row: m.row ?? 2,
@@ -526,15 +172,14 @@ function resetSession() {
       y: 0,
       r: m.radius ?? 30,
       lineOffset: m.lineOffset ?? 0,
-      type: m.type,
     });
   }
 
   enemies.push({
     id: 999,
     kind: "boss",
-    type: cfg.boss.type,
-    element: toElementKey(cfg.boss.element),
+    type: (cfg.boss as any).type,
+    element: toElementKey(cfg.boss.element as any),
     hp: cfg.boss.hp,
     atk: cfg.boss.atk,
     row: cfg.boss.row ?? 4,
@@ -549,22 +194,22 @@ function resetSession() {
   updateHud();
 }
 
-/* ────────── Геометрия поля и рендер ────────── */
+/* ────────────── Геометрия и рендеринг поля ────────────── */
 function getFieldRect() {
   const W = 960,
     H = 540;
   const f = cfg!.field!;
   const fieldW = Math.floor(W * clamp(f.widthRatio ?? 0.35, 0, 1));
-  const fieldH = H - f.padding!.top - f.padding!.bottom;
+  const fieldH = H - (f.padding?.top ?? 40) - (f.padding?.bottom ?? 120);
   const fieldX = Math.floor((W - fieldW) / 2);
-  const fieldY = f.padding!.top;
+  const fieldY = f.padding?.top ?? 40;
   return { fieldX, fieldY, fieldW, fieldH };
 }
 
 function getRowYs(
   rows: number,
   rect: { fieldX: number; fieldY: number; fieldW: number; fieldH: number },
-  field: FieldCfg
+  field: any
 ) {
   const insetTop = field.lineInsetTop ?? 14;
   const insetBottom = field.lineInsetBottom ?? 14;
@@ -593,19 +238,19 @@ function layoutEnemies() {
   }
 }
 
-/* ────────── HUD ────────── */
+/* ────────────── HUD ────────────── */
 function updateHud() {
   if (!cfg) return;
   const hpEl = document.getElementById("hp");
   if (hpEl)
-    hpEl.textContent = `HP: ${playerHp}/${cfg.player.hpMax} | Ходы: ${hitsLeft}`;
+    hpEl.textContent = `HP: ${cfg.player.hp}/${cfg.player.hpMax} | Ходы: ${hitsLeft}`;
   const ab = document.getElementById("ability");
-  if (ab) ab.textContent = `Абилка: ${abilityIdx}`;
+  if (ab) ab.textContent = `Абилка: ${getSelectedAbility() ?? "ab0"}`;
   const we = document.getElementById("weapon");
-  if (we) we.textContent = `Оружие: ${weaponIdx}`;
+  if (we) we.textContent = `Оружие: ${selectedWeaponId}`;
 }
 
-/* ────────── Рисунок кружка (badge) ────────── */
+/* ────────────── Рисование врага (badge) ────────────── */
 function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   const isBoss = e.kind === "boss";
   const hpSize = isBoss ? 36 : 16;
@@ -630,7 +275,212 @@ function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   s.text(String(e.atk), e.x, e.y + atkDy + offset);
 }
 
-/* ────────── Сцена p5 ────────── */
+/* ────────────── Логика ударов (compute/perform) ────────────── */
+function rollByLuck(minVal: number, maxVal: number, luck: number): number {
+  const L = Math.max(0, Math.min(1, luck / 100));
+  const exp = Math.max(0.3, 1 - 0.7 * L);
+  const u = Math.random() ** exp;
+  return Math.round(minVal + (maxVal - minVal) * u);
+}
+
+function getCritFromLuck(luck: number) {
+  const pct = Math.floor(luck / 10);
+  const did = Math.random() * 100 < pct;
+  return { critPct: pct, didCrit: did, critMul: did ? 2 : 1 };
+}
+
+function getMissForWeapon(weapon: WeaponCfg, pos1to4: number, luck: number) {
+  const base =
+    weapon.miss?.baseByPos?.[Math.max(1, Math.min(4, pos1to4)) - 1] ?? 0;
+  const step = weapon.miss?.luckStep ?? 10;
+  const per = weapon.miss?.luckPerStepPct ?? 1;
+  const steps = Math.floor(luck / step);
+  const missPct = Math.max(0, Math.min(100, base - steps * per));
+  const didMiss = Math.random() * 100 < missPct;
+  return { missPct, didMiss };
+}
+
+function getElemCoef(
+  matrix: ElementMatrixCfg | undefined,
+  atk: ElementKey,
+  def: ElementKey
+) {
+  const M = matrix ?? defaultElementMatrix;
+  return M[atk]?.[def] ?? 1.0;
+}
+
+function abilityPctFor(player: PlayerCfg, el: ElementKey) {
+  if (el === "none") return 1;
+  let v = player.elements?.[el] ?? 1;
+  if (v > 1.001) v /= 100;
+  return v;
+}
+
+function computeSingleHit(
+  player: PlayerCfg,
+  weapon: WeaponCfg,
+  target: Enemy,
+  matrix: ElementMatrixCfg | undefined,
+  element: ElementKey,
+  coefMul = 1.0,
+  skipMatrix = false
+) {
+  const luck = player.luck ?? 0;
+  const pct = abilityPctFor(player, element);
+  const pureMin = Math.floor(player.attack.min * pct);
+  const pureMax = Math.floor(player.attack.max * pct);
+
+  const baseCoef = skipMatrix
+    ? 1.0
+    : getElemCoef(matrix ?? defaultElementMatrix, element, target.element);
+  const coef = baseCoef * coefMul;
+
+  const posIdx = Math.max(1, Math.min(4, target.row));
+  const { missPct } = getMissForWeapon(weapon, posIdx, luck);
+
+  const baseRoll = rollByLuck(pureMin, pureMax, luck);
+  const { didCrit, critMul } = getCritFromLuck(luck);
+  const rolledVsElem = Math.round(baseRoll * coef * critMul);
+  const { didMiss } = getMissForWeapon(weapon, posIdx, luck);
+  const finalDamage = didMiss ? 0 : rolledVsElem;
+
+  console.log(
+    [
+      `HIT → tgt#${target.id} ${target.kind} el=${target.element} row=${target.row}`,
+      `selEl=${element} (${(pct * 100).toFixed(0)}%)`,
+      `pure=${pureMin}-${pureMax}`,
+      `coef=×${coef.toFixed(3)} (base=×${baseCoef.toFixed(
+        3
+      )}, mul=×${coefMul.toFixed(3)})`,
+      `roll=${baseRoll} ${didCrit ? "CRIT×2" : ""}`,
+      `miss=${missPct.toFixed(1)}% → final=${finalDamage} ${
+        didMiss ? "(MISS)" : "(HIT)"
+      }`,
+    ].join(" | ")
+  );
+
+  return { finalDamage };
+}
+
+function applyDamage(target: Enemy, dmg: number) {
+  target.hp = Math.max(0, target.hp - dmg);
+}
+
+function performHit(
+  player: PlayerCfg,
+  weapon: WeaponCfg,
+  elementMatrix: ElementMatrixCfg | null | undefined,
+  target: Enemy,
+  ability: "ab0" | "point" | "ab5" | "ab6" | "ab7" | "ab8",
+  opts: {
+    element?: ElementKey;
+    secondCoef?: number;
+    ab8Cost?: number;
+    cycleOrder?: ElementKey[];
+  } = {}
+) {
+  if (target.hp <= 0) {
+    console.log(`Цель #${target.id} уже мертва`);
+    return { type: "skip", reason: "target_dead" };
+  }
+
+  const M: ElementMatrixCfg =
+    elementMatrix ??
+    (cfg?.elementMatrix as ElementMatrixCfg) ??
+    defaultElementMatrix;
+
+  if (ability === "ab8") {
+    const ORDER = opts.cycleOrder ?? ["earth", "fire", "water", "cosmos"];
+    const fromEl = target.element;
+    let toEl: ElementKey;
+    if (opts.element && opts.element !== "none") {
+      toEl = opts.element;
+    } else {
+      const idx = ORDER.indexOf(fromEl);
+      const nextIdx = (idx >= 0 ? idx + 1 : 0) % ORDER.length;
+      toEl = ORDER[nextIdx] as ElementKey;
+    }
+    target.element = toEl;
+    const cost = opts.ab8Cost ?? 2;
+    hitsLeft = Math.max(0, hitsLeft - cost);
+    console.log(
+      `AB8: #${target.id} ${fromEl}→${toEl} | урон=0 | ходы=-${cost}`
+    );
+    updateHud();
+    return { type: "ab8", from: fromEl, to: toEl, cost };
+  }
+
+  if (ability === "ab5" || ability === "ab6" || ability === "ab7") {
+    const superEl: ElementKey =
+      ability === "ab5" ? "fire" : ability === "ab6" ? "earth" : "water";
+    const results: number[] = [];
+    const r1 = computeSingleHit(player, weapon, target, M, superEl);
+    applyDamage(target, r1.finalDamage);
+    results.push(r1.finalDamage);
+
+    let second: Enemy | null = null;
+    if (ability === "ab5") {
+      const cand = enemies.filter((e) => e.id !== target.id && e.hp > 0);
+      cand.sort(
+        (a, b) =>
+          Math.hypot(a.x - target.x, a.y - target.y) -
+          Math.hypot(b.x - target.x, b.y - target.y)
+      );
+      second = cand[0] ?? null;
+    } else if (ability === "ab6") {
+      const same = enemies.filter(
+        (e) => e.id !== target.id && e.hp > 0 && e.row === target.row
+      );
+      same.sort((a, b) => Math.abs(a.x - target.x) - Math.abs(b.x - target.x));
+      second = same[0] ?? null;
+    } else {
+      const forward = enemies
+        .filter(
+          (e) =>
+            e.id !== target.id &&
+            e.hp > 0 &&
+            e.row === target.row &&
+            e.x > target.x
+        )
+        .sort((a, b) => a.x - target.x - (b.x - target.x));
+      second = forward[0] ?? null;
+    }
+
+    if (second) {
+      const coefMul = opts.secondCoef ?? 1.0;
+      const r2 = computeSingleHit(player, weapon, second, M, superEl, coefMul);
+      applyDamage(second, r2.finalDamage);
+      results.push(r2.finalDamage);
+    } else {
+      console.log(`${ability}: второй цели нет`);
+    }
+
+    hitsLeft = Math.max(0, hitsLeft - 1);
+    const total = results.reduce((s, x) => s + x, 0);
+    console.log(`${ability}: total=${total} | ходы=-1`);
+    updateHud();
+    return { type: ability, total, count: results.length };
+  }
+
+  if (ability === "point") {
+    const el = opts.element ?? "none";
+    const r = computeSingleHit(player, weapon, target, M, el);
+    applyDamage(target, r.finalDamage);
+    hitsLeft = Math.max(0, hitsLeft - 1);
+    console.log(`POINT ${el}: dmg=${r.finalDamage} | ходы=-1`);
+    updateHud();
+    return { type: "point", element: el, damage: r.finalDamage };
+  } else {
+    const r = computeSingleHit(player, weapon, target, M, "none");
+    applyDamage(target, r.finalDamage);
+    hitsLeft = Math.max(0, hitsLeft - 1);
+    console.log(`AB0: dmg=${r.finalDamage} | ходы=-1`);
+    updateHud();
+    return { type: "ab0", damage: r.finalDamage };
+  }
+}
+
+/* ────────────── p5-сцена ────────────── */
 const selectedIcons: Record<number, p5.Image> = {};
 
 const sketch = (s: p5) => {
@@ -775,188 +625,6 @@ const sketch = (s: p5) => {
     }
   };
 
-  function spendTurns(n: number) {
-    // @ts-ignore
-    hitsLeft = Math.max(0, (hitsLeft as number) - n);
-    updateHud?.();
-  }
-
-  function applyDamage(target: Enemy, dmg: number) {
-    target.hp = Math.max(0, target.hp - dmg);
-  }
-
-  function abilityPctFor(player: PlayerCfg, el: ElementKey) {
-    if (el === "none") return 1;
-    let v = player.elements?.[el] ?? 1;
-    if (v > 1.001) v /= 100;
-    return v;
-  }
-
-  function computeSingleHit(
-    player: PlayerCfg,
-    weapon: WeaponCfg,
-    target: Enemy,
-    matrix: ElementMatrixCfg | undefined,
-    element: ElementKey,
-    coefMul = 1.0,
-    skipMatrix = false
-  ) {
-    const luck = player.luck ?? 0;
-    const pct = abilityPctFor(player, element);
-    const pureMin = Math.floor(player.attack.min * pct);
-    const pureMax = Math.floor(player.attack.max * pct);
-
-    const baseCoef = skipMatrix
-      ? 1.0
-      : getElemCoef(matrix ?? defaultElementMatrix, element, target.element);
-    const coef = baseCoef * coefMul;
-
-    const posIdx = Math.max(1, Math.min(4, target.row));
-    const { missPct } = getMissForWeapon(weapon, posIdx, luck);
-
-    const baseRoll = rollByLuck(pureMin, pureMax, luck);
-    const { didCrit, critMul } = getCritFromLuck(luck);
-    const rolledVsElem = Math.round(baseRoll * coef * critMul);
-    const { didMiss } = getMissForWeapon(weapon, posIdx, luck);
-    const finalDamage = didMiss ? 0 : rolledVsElem;
-
-    console.log(
-      [
-        `HIT → tgt#${target.id} ${target.kind} el=${target.element} row=${target.row}`,
-        `selEl=${element} (${(pct * 100).toFixed(0)}%)`,
-        `pure=${pureMin}-${pureMax}`,
-        `coef=×${coef.toFixed(3)} (base=×${baseCoef.toFixed(
-          3
-        )}, mul=×${coefMul.toFixed(3)})`,
-        `roll=${baseRoll} ${didCrit ? "CRIT×2" : ""}`,
-        `miss=${missPct.toFixed(1)}% → final=${finalDamage} ${
-          didMiss ? "(MISS)" : "(HIT)"
-        }`,
-      ].join(" | ")
-    );
-
-    return { finalDamage };
-  }
-
-  function performHit(
-    player: PlayerCfg,
-    weapon: WeaponCfg,
-    elementMatrix: ElementMatrixCfg | null | undefined,
-    target: Enemy,
-    ability: "ab0" | "point" | "ab5" | "ab6" | "ab7" | "ab8",
-    opts: {
-      element?: ElementKey;
-      secondCoef?: number;
-      ab8Cost?: number;
-      cycleOrder?: ElementKey[];
-    } = {}
-  ) {
-    if (target.hp <= 0) {
-      console.log(`Цель #${target.id} уже мертва`);
-      return { type: "skip", reason: "target_dead" };
-    }
-
-    const M: ElementMatrixCfg =
-      elementMatrix ??
-      (cfg?.elementMatrix as ElementMatrixCfg) ??
-      defaultElementMatrix;
-
-    if (ability === "ab8") {
-      const ORDER = opts.cycleOrder ?? ["earth", "fire", "water", "cosmos"];
-      const fromEl = target.element;
-      let toEl: ElementKey;
-      if (opts.element && opts.element !== "none") {
-        toEl = opts.element;
-      } else {
-        const idx = ORDER.indexOf(fromEl);
-        const nextIdx = (idx >= 0 ? idx + 1 : 0) % ORDER.length;
-        toEl = ORDER[nextIdx] as ElementKey;
-      }
-      target.element = toEl;
-      const cost = opts.ab8Cost ?? 2;
-      spendTurns(cost);
-      console.log(
-        `AB8: #${target.id} ${fromEl}→${toEl} | урон=0 | ходы=-${cost}`
-      );
-      return { type: "ab8", from: fromEl, to: toEl, cost };
-    }
-
-    if (ability === "ab5" || ability === "ab6" || ability === "ab7") {
-      const superEl: ElementKey =
-        ability === "ab5" ? "fire" : ability === "ab6" ? "earth" : "water";
-      const results: number[] = [];
-      const r1 = computeSingleHit(player, weapon, target, M, superEl);
-      applyDamage(target, r1.finalDamage);
-      results.push(r1.finalDamage);
-
-      let second: Enemy | null = null;
-      if (ability === "ab5") {
-        const cand = enemies.filter((e) => e.id !== target.id && e.hp > 0);
-        cand.sort(
-          (a, b) =>
-            Math.hypot(a.x - target.x, a.y - target.y) -
-            Math.hypot(b.x - target.x, b.y - target.y)
-        );
-        second = cand[0] ?? null;
-      } else if (ability === "ab6") {
-        const same = enemies.filter(
-          (e) => e.id !== target.id && e.hp > 0 && e.row === target.row
-        );
-        same.sort(
-          (a, b) => Math.abs(a.x - target.x) - Math.abs(b.x - target.x)
-        );
-        second = same[0] ?? null;
-      } else {
-        const forward = enemies
-          .filter(
-            (e) =>
-              e.id !== target.id &&
-              e.hp > 0 &&
-              e.row === target.row &&
-              e.x > target.x
-          )
-          .sort((a, b) => a.x - target.x - (b.x - target.x));
-        second = forward[0] ?? null;
-      }
-
-      if (second) {
-        const coefMul = opts.secondCoef ?? 1.0;
-        const r2 = computeSingleHit(
-          player,
-          weapon,
-          second,
-          M,
-          superEl,
-          coefMul
-        );
-        applyDamage(second, r2.finalDamage);
-        results.push(r2.finalDamage);
-      } else {
-        console.log(`${ability}: второй цели нет`);
-      }
-
-      spendTurns(1);
-      const total = results.reduce((s, x) => s + x, 0);
-      console.log(`${ability}: total=${total} | ходы=-1`);
-      return { type: ability, total, count: results.length };
-    }
-
-    if (ability === "point") {
-      const el = opts.element ?? "none";
-      const r = computeSingleHit(player, weapon, target, M, el);
-      applyDamage(target, r.finalDamage);
-      spendTurns(1);
-      console.log(`POINT ${el}: dmg=${r.finalDamage} | ходы=-1`);
-      return { type: "point", element: el, damage: r.finalDamage };
-    } else {
-      const r = computeSingleHit(player, weapon, target, M, "none");
-      applyDamage(target, r.finalDamage);
-      spendTurns(1);
-      console.log(`AB0: dmg=${r.finalDamage} | ходы=-1`);
-      return { type: "ab0", damage: r.finalDamage };
-    }
-  }
-
   s.mousePressed = () => {
     const pickedWeaponId = handleWeaponClick(s.mouseX, s.mouseY);
     if (pickedWeaponId !== null) {
@@ -1026,6 +694,7 @@ const sketch = (s: p5) => {
       result.type !== "ab8" &&
       result.type !== "skip"
     ) {
+      // теперь оркеструем анимацию через анимированный модуль (он уменьшит HP в пике)
       queueEnemyRetaliationToHp(
         cfg,
         enemy,
@@ -1040,27 +709,7 @@ const sketch = (s: p5) => {
   };
 };
 
-/* ────────── Инициация сцены и UI события ────────── */
-(async () => {
-  await loadConfig();
-  new p5(sketch);
-
-  document
-    .getElementById("restart")
-    ?.addEventListener("click", () => resetSession());
-
-  const fileInput = document.getElementById("file") as HTMLInputElement | null;
-  fileInput?.addEventListener("change", (ev) => {
-    const input = ev.target as HTMLInputElement;
-    if (!input.files || !input.files[0]) return;
-    input.files[0].text().then((txt) => {
-      cfg = JSON.parse(txt) as Cfg;
-      normalizeConfig();
-      resetSession();
-    });
-  });
-})();
-
+/* ────────────── Утилиты: селекты и иконка оружия ────────────── */
 function getSelectedWeaponCfg(): WeaponCfg | null {
   if (!cfg?.weapons) return null;
   return cfg.weapons.find((w) => w.id === selectedWeaponId) ?? null;
@@ -1072,21 +721,20 @@ function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
     cfg.weapons.find((w) => w.id === selectedWeaponId) ?? cfg.weapons[0];
   if (!weapon) return;
   const dy = Math.sin(p.frameCount / 10) * 1.5;
-  const img = selectedIcons[weapon.id];
-  p.image(img, x + 260, y - 40 + dy, 64, 120);
+  const img = (selectedIcons as any)[weapon.id] as p5.Image | undefined;
+  if (img) p.image(img, x + 260, y - 40 + dy, 64, 120);
 
   const selectedEl = getActiveElementFromPointAbility();
-  const dbg = DebugStatsPlayerDamage(cfg.player, selectedEl);
+  const dbg = DebugStatsPlayerDamage(cfg!.player, selectedEl);
   p.fill(0);
   p.textSize(14);
   p.textAlign(p.LEFT, p.TOP);
   p.text(`${dbg.min} – ${dbg.max}`, x + 270, y + size / 2 - 8 + 55);
 }
 
-/* ────────── Debug: чистый min/max по выбранной стихии ────────── */
+/* ────────────── Отладка: min/max по стихии ────────────── */
 let lastPlayerDebugLine = "";
 const ELEMENTS_4: ElementKey[] = ["earth", "fire", "water", "cosmos"];
-
 function DebugStatsPlayerDamage(
   player: PlayerCfg,
   selectedElement: ElementKey
@@ -1122,36 +770,23 @@ function DebugStatsPlayerDamage(
   return { min: pureMinSel, max: pureMaxSel };
 }
 
-/* ────────── Luck / Crit / Miss / Elem helpers ────────── */
-function rollByLuck(minVal: number, maxVal: number, luck: number): number {
-  const L = Math.max(0, Math.min(1, luck / 100));
-  const exp = Math.max(0.3, 1 - 0.7 * L);
-  const u = Math.random() ** exp;
-  return Math.round(minVal + (maxVal - minVal) * u);
-}
+/* ────────────── Запуск ────────────── */
+(async () => {
+  await loadConfig();
+  new p5(sketch);
 
-function getCritFromLuck(luck: number) {
-  const pct = Math.floor(luck / 10);
-  const did = Math.random() * 100 < pct;
-  return { critPct: pct, didCrit: did, critMul: did ? 2 : 1 };
-}
+  document
+    .getElementById("restart")
+    ?.addEventListener("click", () => resetSession());
 
-function getMissForWeapon(weapon: WeaponCfg, pos1to4: number, luck: number) {
-  const base =
-    weapon.miss?.baseByPos?.[Math.max(1, Math.min(4, pos1to4)) - 1] ?? 0;
-  const step = weapon.miss?.luckStep ?? 10;
-  const per = weapon.miss?.luckPerStepPct ?? 1;
-  const steps = Math.floor(luck / step);
-  const missPct = Math.max(0, Math.min(100, base - steps * per));
-  const didMiss = Math.random() * 100 < missPct;
-  return { missPct, didMiss };
-}
-
-function getElemCoef(
-  matrix: ElementMatrixCfg | undefined,
-  atk: ElementKey,
-  def: ElementKey
-) {
-  const M = matrix ?? defaultElementMatrix;
-  return M[atk]?.[def] ?? 1.0;
-}
+  const fileInput = document.getElementById("file") as HTMLInputElement | null;
+  fileInput?.addEventListener("change", (ev) => {
+    const input = ev.target as HTMLInputElement;
+    if (!input.files || !input.files[0]) return;
+    input.files[0].text().then((txt) => {
+      cfg = JSON.parse(txt) as Cfg;
+      normalizeConfig();
+      resetSession();
+    });
+  });
+})();
