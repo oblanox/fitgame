@@ -147,6 +147,28 @@ type Cfg = {
   elementMatrix?: ElementMatrixCfg;
 };
 
+/* ПОЛЯ АНИМАЦИЯ И ЭФФЕКТОВ */
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Ответка врага: «опускаем целиком врага к полоске HP → красный всплеск → назад»
+   — без изменения типов Enemy и Cfg
+   — состояние анимации хранится в WeakMap
+   — всплеск рисуем отдельным оверлеем (вызывается после drawHpStatus)
+──────────────────────────────────────────────────────────────────────────── */
+
+type RetaliationRule = "t1" | "t2" | "t3";
+
+type EnemyAnimState = {
+  phase: "down" | "hit" | "up";
+  t0: number;
+  downMs: number; // спуск к HP
+  hitMs: number; // удержание + нанесение урона в конце
+  upMs: number; // возврат
+  startY: number; // стартовая Y врага (мировая/экранная)
+  targetY: number; // целевая Y (якорь HP)
+  dmgApplied: boolean;
+};
+
 /* ──────────────────────────────────────────────────────────────────────────────
    СОСТОЯНИЕ ВИЗУАЛИЗАЦИИ
    - cfg: текущая конфигурация (из /public/config.json или загруженная файлом).
@@ -159,9 +181,288 @@ const weaponIdx = 1;
 let playerHp = 0;
 let hitsLeft = 0;
 
+const animByEnemy = new WeakMap<Enemy, EnemyAnimState>();
+
+// ── вспомогательные состояния
+const nowMs = () =>
+  typeof performance !== "undefined" ? performance.now() : Date.now();
+
+function easeInOutQuad(t: number) {
+  t = Math.max(0, Math.min(1, t));
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+function easeOutBack(t: number) {
+  t = Math.max(0, Math.min(1, t));
+  const c1 = 1.70158,
+    c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+}
+
+/* ─────────────────────────── HP-якорь и всплески ─────────────────────────── */
+
+let hpBarY = 0;
+let hpBarSet = false;
+
+// был export function setHpAnchor(x, y)
+export function setHpBarY(y: number) {
+  hpBarY = y;
+  hpBarSet = true;
+}
+
+/** Красный всплеск на HP */
+type HpImpact = {
+  x: number;
+  y: number;
+  r0: number;
+  r1: number;
+  t0: number;
+  ms: number;
+};
+const hpImpacts: HpImpact[] = [];
+
+/** Вызови каждый кадр ПОСЛЕ drawHpStatus(p, cfg) */
+export function drawHpImpactOverlay(p: p5) {
+  const t = nowMs();
+  for (let i = hpImpacts.length - 1; i >= 0; --i) {
+    const it = hpImpacts[i];
+    const k = Math.min(1, (t - it.t0) / it.ms);
+    const r = it.r0 + (it.r1 - it.r0) * easeOutBack(k);
+    const a = 1 - k;
+
+    p.push();
+    p.noFill();
+    p.stroke(255, 0, 0, 255 * a);
+    p.strokeWeight(3);
+    p.circle(it.x, it.y, r * 2);
+    p.pop();
+
+    if (k >= 1) hpImpacts.splice(i, 1);
+  }
+}
+
+/* ────────────────────────── Смещение врага по Y ──────────────────────────── */
+
+export function getEnemyYOffset(e: Enemy): number {
+  return Number((e as any).yOffset ?? 0) || 0;
+}
+function setEnemyYOffset(e: Enemy, yOff: number) {
+  (e as any).yOffset = yOff || 0;
+}
+
+/* ───────────────────── Контрудар: очередь и анимация ────────────────────── */
+
+/** Запусти ответки. Правило: "t1" цель; "t2" цель+сосед; "t3" вся линия. */
+export function queueEnemyRetaliationToHp(
+  cfg: Cfg,
+  target: Enemy,
+  all: Enemy[],
+  ctx: { reason: string; totalDamage?: number },
+  rule: RetaliationRule = "t1"
+) {
+  if (!cfg?.player || !target || target.hp <= 0) return;
+
+  // выбираем кандидатов
+  const row = Number((target as any).row ?? 1);
+  let list: Enemy[] = [];
+  switch (rule) {
+    case "t1":
+      list = [target];
+      break;
+    case "t2": {
+      list = [target];
+      const sameRow = all
+        .filter(
+          (e) =>
+            e !== target && e.hp > 0 && Number((e as any).row ?? row) === row
+        )
+        .sort(
+          (a, b) =>
+            Math.abs((a as any).col - (target as any).col) -
+            Math.abs((b as any).col - (target as any).col)
+        );
+      if (sameRow[0]) list.push(sameRow[0]);
+      break;
+    }
+    case "t3":
+      list = all.filter(
+        (e) => e.hp > 0 && Number((e as any).row ?? row) === row
+      );
+      break;
+  }
+  // не дублировать занятых
+  list = list.filter((e) => !animByEnemy.get(e));
+
+  const rules: any = (cfg as any).rules ?? {};
+  const gap = Number(rules.chainGapMs ?? 120);
+
+  list.forEach((e, i) => {
+    setTimeout(() => startEnemyDiveToHp(cfg, e, ctx), i * gap);
+  });
+}
+
+/** Анимация: опускаем врага до hpAnchor → всплеск → возвращаем обратно */
+function startEnemyDiveToHp(
+  cfg: Cfg,
+  enemy: Enemy,
+  ctx: { reason: string; totalDamage?: number }
+) {
+  if (enemy.hp <= 0 || animByEnemy.get(enemy)) return;
+
+  // Если якорь HP ещё не известен — делаем короткий «кивок» на месте.
+  const hasHp = hpBarSet;
+
+  const rules: any = (cfg as any).rules ?? {};
+  const downMs = hasHp ? Number(rules.outMs ?? 240) : 140;
+  const hitMs = Number(rules.hitMs ?? 120);
+  const upMs = hasHp ? Number(rules.backMs ?? 260) : 160;
+
+  const startY = Number((enemy as any).y ?? 0);
+  const targetY = hpBarSet ? hpBarY : startY + Number(rules.dropPx ?? 26);
+
+  const st: EnemyAnimState = {
+    phase: "down",
+    t0: nowMs(),
+    downMs,
+    hitMs,
+    upMs,
+    startY,
+    targetY,
+    dmgApplied: false,
+  };
+  animByEnemy.set(enemy, st);
+  requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
+}
+
+function animTickDive(
+  cfg: Cfg,
+  enemy: Enemy,
+  ctx: { reason: string; totalDamage?: number }
+) {
+  const st = animByEnemy.get(enemy);
+  if (!st) return;
+
+  const t = nowMs();
+
+  if (st.phase === "down") {
+    const k = Math.min(1, (t - st.t0) / st.downMs);
+    const y = lerp(st.startY, st.targetY, easeInOutQuad(k));
+    setEnemyYOffset(enemy, y - st.startY);
+
+    if (k < 1) {
+      requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
+      return;
+    }
+
+    // дошли до HP — удар через «всплеск»
+    st.phase = "hit";
+    st.t0 = t;
+
+    // красный круг по HP
+    if (hpBarSet) {
+      const impactX =
+        (enemy as any).x ?? getFieldRect().fieldX + getFieldRect().fieldW / 2;
+      const impactY = hpBarSet ? hpBarY : ((enemy as any).y ?? 0) + 26; // fallback, если не успели задать barY
+      hpImpacts.push({
+        x: impactX,
+        y: impactY,
+        r0: 6,
+        r1: 36,
+        t0: t,
+        ms: Math.max(220, st.hitMs + 80),
+      });
+    }
+
+    requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
+    return;
+  }
+
+  if (st.phase === "hit") {
+    const k = Math.min(1, (t - st.t0) / st.hitMs);
+    // лёгкое «пружинящее» покачивание обводки (если она у тебя рисуется относительно врага)
+    const outlineKick = Math.sin(k * Math.PI) * 2; // 0..2..0
+    (enemy as any).__outlineKick = outlineKick; // необязательно, но можно учесть в рендере обводки
+
+    if (!st.dmgApplied && st.hitMs - (t - st.t0) <= 16) {
+      applyEnemyDamageToPlayer(cfg, enemy, ctx);
+      st.dmgApplied = true;
+    }
+
+    if (k < 1) {
+      requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
+      return;
+    }
+
+    st.phase = "up";
+    st.t0 = t;
+    requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
+    return;
+  }
+
+  if (st.phase === "up") {
+    const k = Math.min(1, (t - st.t0) / st.upMs);
+    // Возврат с лёгким перелётом
+    const back = easeOutBack(k);
+    const y = lerp(st.targetY, st.startY - 6 /* маленький «перелёт» */, back);
+    setEnemyYOffset(enemy, y - st.startY);
+
+    if (k < 1) {
+      requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
+      return;
+    }
+
+    setEnemyYOffset(enemy, 0);
+    (enemy as any).__outlineKick = 0;
+    animByEnemy.delete(enemy);
+    return;
+  }
+}
+
+/* ───────────────────────────── Урон игроку ──────────────────────────────── */
+
+function applyEnemyDamageToPlayer(
+  cfg: Cfg,
+  enemy: Enemy,
+  ctx: { reason: string; totalDamage?: number }
+) {
+  if (!cfg?.player) return;
+
+  const rules: any = (cfg as any).rules ?? {};
+  const base = Number((enemy as any).atk ?? 6);
+  const isBoss = (enemy as any).kind === "boss";
+  const mul = isBoss
+    ? Number(rules.bossRetaliationMul ?? 0.75)
+    : Number(rules.retaliationMul ?? 0.5);
+  const reactive = ctx.totalDamage
+    ? Math.min(1.5, 0.3 + ctx.totalDamage / 100)
+    : 1;
+
+  let dmg = Math.max(1, Math.round(base * mul * reactive));
+  const def = Number((cfg.player as any).defense ?? 0);
+  dmg = Math.max(0, dmg - def);
+
+  const prev = Number((cfg.player as any).hp ?? 0);
+  (cfg.player as any).hp = Math.max(0, prev - dmg);
+
+  try {
+    (cfg.player as any).onDamaged?.(dmg, enemy, ctx.reason);
+  } catch {}
+  console.log(
+    `[retaliation→HP] enemy=${(enemy as any).id ?? "?"} dmg=${dmg} reason=${
+      ctx.reason
+    }`
+  );
+}
+
+/* ───────────────────────────── Мелочи ──────────────────────────────────── */
+
+function lerp(a: number, b: number, k: number) {
+  return a + (b - a) * k;
+}
+
 type Enemy = {
   id: number;
   kind: "minion" | "boss";
+  type: number;
   element: ElementKey;
   hp: number;
   atk: number;
@@ -288,6 +589,7 @@ function resetSession() {
       y: 0,
       r: m.radius ?? 30,
       lineOffset: m.lineOffset ?? 0,
+      type: m.type,
     });
   }
 
@@ -295,6 +597,7 @@ function resetSession() {
   enemies.push({
     id: 999,
     kind: "boss",
+    type: cfg.boss.type,
     element: toElementKey(cfg.boss.element),
     hp: cfg.boss.hp,
     atk: cfg.boss.atk,
@@ -396,7 +699,7 @@ function updateHud() {
    - у босса крупнее шрифт.
    - белый полу‑прозрачный обводочный контур для читаемости.
    ────────────────────────────────────────────────────────────────────────────── */
-function drawEnemyBadge(s: p5, e: Enemy) {
+function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   const isBoss = e.kind === "boss";
   const hpSize = isBoss ? 36 : 16;
   const atkSize = isBoss ? 18 : 10;
@@ -409,18 +712,18 @@ function drawEnemyBadge(s: p5, e: Enemy) {
   s.noStroke();
   s.fill(0, 140);
   s.textSize(hpSize);
-  s.text(String(e.hp), e.x + 1, e.y + hpDy + 1);
+  s.text(String(e.hp), e.x + 1, e.y + hpDy + 1 + offset);
   s.textSize(atkSize);
-  s.text(String(e.atk), e.x + 1, e.y + atkDy + 1);
+  s.text(String(e.atk), e.x + 1, e.y + atkDy + 1 + offset);
 
   // основной слой: чёрный текст с полупрозрачным белым контуром
   s.stroke(255, 255, 255, 150);
   s.strokeWeight(isBoss ? 1.2 : 1.0);
   s.fill(20);
   s.textSize(hpSize);
-  s.text(String(e.hp), e.x, e.y + hpDy);
+  s.text(String(e.hp), e.x, e.y + hpDy + offset);
   s.textSize(atkSize);
-  s.text(String(e.atk), e.x, e.y + atkDy);
+  s.text(String(e.atk), e.x, e.y + atkDy + offset);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -496,19 +799,19 @@ const sketch = (s: p5) => {
       // сам круг
       s.noStroke();
       s.fill(ELEMENT_COLOR[e.element]);
-      s.circle(e.x, e.y, e.r * 2);
+      s.circle(e.x, e.y + getEnemyYOffset(e), e.r * 2);
 
       // подсветка наведённого круга (серое + белое полупрозрачное кольцо)
       if (hoveredId === e.id) {
         s.noFill();
         s.stroke(100);
         s.strokeWeight(3);
-        s.circle(e.x, e.y, e.r * 2 + 6);
+        s.circle(e.x, e.y + getEnemyYOffset(e), e.r * 2 + 6);
         s.noStroke();
       }
 
       // подписи HP/ATK
-      drawEnemyBadge(s, e);
+      drawEnemyBadge(s, e, getEnemyYOffset(e));
     }
 
     let barY = fieldH;
@@ -519,6 +822,10 @@ const sketch = (s: p5) => {
       hp: cfg.player.hp,
       hpMax: cfg.player.hpMax,
     });
+    // один раз на старте кадра (или при изменении лэйаута) укажи якорь HP
+    // например, центр полоски HP:
+    setHpBarY(barY);
+    drawHpImpactOverlay(s);
 
     barY = barY + 60; // чуть ниже полоски HP
 
@@ -577,6 +884,7 @@ const sketch = (s: p5) => {
     if (cfg.elementMatrix) {
       drawElementSchema(s, fieldX, barY, fieldW, cfg.elementMatrix);
     }
+    //updateRetaliationAnimations(cfg, s);
   };
 
   // ответы врага
@@ -830,18 +1138,6 @@ const sketch = (s: p5) => {
   }
 
   // ─── Задел под ответ врага ───────────────────────────────────────────────────
-  type EnemyResponseCtx = { reason: string; totalDamage?: number };
-
-  function queueEnemyRetaliation(target: Enemy, ctx: EnemyResponseCtx) {
-    // Здесь можно поставить флажок и обработать в draw() или сразу сделать ответ.
-    // Пример заглушки:
-    if (target.hp > 0) {
-      console.log(
-        `ENEMY RESPONSE queued: tgt#${target.id} reason=${ctx.reason}`
-      );
-      // TODO: тут буду реализовать контратаку врага, эффекты статусов, дебаффы, и т.п.
-    }
-  }
 
   // ─── Helper: базовый удар (AB0) без стихий ───────────────────────────────────
   function doBasicHit(player: PlayerCfg, weapon: WeaponCfg, enemy: Enemy) {
@@ -889,8 +1185,6 @@ const sketch = (s: p5) => {
 
     return { finalDamage };
   }
-
-  // ─── Отладочный точечный удар (ab1–ab4) ─────────────────────────────────────
 
   // ─── Клик мыши ────────────────────────────────────────────────────────────────
   s.mousePressed = () => {
@@ -967,6 +1261,22 @@ const sketch = (s: p5) => {
       abilityType,
       options
     );
+
+    // Ответ врага
+    if (
+      result &&
+      typeof result === "object" &&
+      result.type !== "ab8" &&
+      result.type !== "skip"
+    ) {
+      queueEnemyRetaliationToHp(
+        cfg,
+        enemy,
+        enemies,
+        { reason: "counter", totalDamage: 1 },
+        "t1"
+      );
+    }
 
     // Обрабатываем результат
     console.log("Результат удара:", result);
