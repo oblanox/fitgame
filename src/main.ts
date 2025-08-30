@@ -27,7 +27,7 @@ import {
   getSelectedAbility,
   isSuperAbilityEnabled,
 } from "./ui/abilities";
-import { initGameLogger, drawLogPanel } from "./ui/log_panel";
+import { initGameLogger } from "./ui/log_panel";
 
 /* Импорты из вынесённых файлов */
 import {
@@ -197,11 +197,30 @@ function resetSession() {
 /* ────────────── Геометрия и рендеринг поля ────────────── */
 function getFieldRect() {
   const W = 960,
-    H = 540;
+    H = 540; // оставляем прежние canvas dims, если у тебя другие — подправь
   const f = cfg!.field!;
   const fieldW = Math.floor(W * clamp(f.widthRatio ?? 0.35, 0, 1));
   const fieldH = H - (f.padding?.top ?? 40) - (f.padding?.bottom ?? 120);
-  const fieldX = Math.floor((W - fieldW) / 2);
+
+  // читаем anchor из конфига: 'left' | 'center' | 'right' (по умолчанию center — поведение как раньше)
+  const anchor = (f.anchor as string) ?? "center";
+
+  // отступ слева/справа из padding (если передаёшь padding.left в конфиге — учтём)
+  const padLeft = Number(f.padding?.left ?? 0);
+  const padRight = Number(f.padding?.right ?? 0);
+
+  let fieldX = 0;
+  if (anchor === "left") {
+    // прижатие к левому краю canvas с учётом padding.left
+    fieldX = padLeft;
+  } else if (anchor === "right") {
+    // прижатие к правому краю canvas с учётом padding.right
+    fieldX = Math.max(0, W - fieldW - padRight);
+  } else {
+    // center (поведение по умолчанию)
+    fieldX = Math.floor((W - fieldW) / 2);
+  }
+
   const fieldY = f.padding?.top ?? 40;
   return { fieldX, fieldY, fieldW, fieldH };
 }
@@ -484,7 +503,7 @@ function performHit(
 const selectedIcons: Record<number, p5.Image> = {};
 
 const sketch = (s: p5) => {
-  const W = 960,
+  const W = 400,
     H = 1400;
   let hoveredId: number | null = null;
 
@@ -501,7 +520,7 @@ const sketch = (s: p5) => {
     preloadWeaponIcons(s);
     preloadWeaponSelected(s);
     preloadElementSchema(s);
-    initGameLogger();
+    initGameLogger({ attachToSelector: "#canvas-wrap" });
   };
 
   s.draw = () => {
@@ -555,7 +574,7 @@ const sketch = (s: p5) => {
 
     let barY = fieldH;
     const weaponY = barY;
-    drawLogPanel(s, cfg);
+    //drawLogPanel(s, cfg);
     drawPanelBg(s, fieldX, barY, fieldW, 750, cfg.field?.bg);
     drawHpStatus(s, fieldX, barY, fieldW, {
       hp: cfg.player.hp,

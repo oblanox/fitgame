@@ -1,255 +1,347 @@
-// ui/log_panel.ts (sequential typewriter, no textBounds)
-import p5 from "p5";
+// src/ui/log_panel.ts
+// Minimal DOM log panel: mirrors console.* into a nearby DOM pane with scrollbar.
+// Usage: import { initGameLogger, pushLog, clearLog, setAutoFollow } from "./ui/log_panel";
 
-type Level = "log" | "warn" | "error" | "info";
+type Level = "LOG" | "INFO" | "WARN" | "ERROR";
 
-type LogEntry = {
-  level: Level;
-  text: string;
-  time: number;
-  reveal: number;
-  height?: number; // кэш высоты (px)
-  wrapped?: string[]; // кэш строк после переноса
-};
+let originalConsoleLog = console.log.bind(console);
+let originalConsoleInfo = console.info
+  ? console.info.bind(console)
+  : originalConsoleLog;
+let originalConsoleWarn = console.warn
+  ? console.warn.bind(console)
+  : originalConsoleLog;
+let originalConsoleError = console.error
+  ? console.error.bind(console)
+  : originalConsoleLog;
 
-const MAX_HISTORY = 200;
-const CHAR_PER_SEC = 40;
-const PADDING = 12;
-const LINE_GAP = 4; // промежуток между абзацами
-const LINE_HEIGHT_EM = 1.2; // множитель высоты строки
+let hooked = false;
 
-let history: LogEntry[] = []; // завершённые записи
-let queue: LogEntry[] = []; // ожидают анимации
-let current: LogEntry | null = null;
+let containerEl: HTMLElement | null = null;
+let headerBtnFollow: HTMLButtonElement | null = null;
+let headerBtnClear: HTMLButtonElement | null = null;
+let contentEl: HTMLElement | null = null;
+let autoFollow = true;
+let userScrolled = false;
 
-const original = {
-  log: console.log,
-  warn: console.warn,
-  error: console.error,
-  info: console.info,
-};
+/**
+ * initGameLogger()
+ * - creates the DOM log panel and hooks console.* by default
+ * - options: attachToSelector (string) to insert panel into a specific parent (e.g. '#canvas-wrap')
+ */
+export function initGameLogger(opts: { attachToSelector?: string } = {}) {
+  if (!containerEl) createDomPanel(opts.attachToSelector);
 
-export function gameLog(...args: any[]) {
-  push("log", args);
-}
-export function gameWarn(...args: any[]) {
-  push("warn", args);
-}
-export function gameError(...args: any[]) {
-  push("error", args);
-}
-export function gameInfo(...args: any[]) {
-  push("info", args);
-}
+  if (!hooked) {
+    originalConsoleLog = console.log.bind(console);
+    originalConsoleInfo = console.info
+      ? console.info.bind(console)
+      : originalConsoleLog;
+    originalConsoleWarn = console.warn
+      ? console.warn.bind(console)
+      : originalConsoleLog;
+    originalConsoleError = console.error
+      ? console.error.bind(console)
+      : originalConsoleLog;
 
-function stringify(arg: any): string {
-  try {
-    if (typeof arg === "string") return arg;
-    return JSON.stringify(arg);
-  } catch {
-    return String(arg);
+    console.log = (...args: any[]) => {
+      mirror("LOG", args);
+      originalConsoleLog(...args);
+    };
+    console.info = (...args: any[]) => {
+      mirror("INFO", args);
+      originalConsoleInfo(...args);
+    };
+    console.warn = (...args: any[]) => {
+      mirror("WARN", args);
+      originalConsoleWarn(...args);
+    };
+    console.error = (...args: any[]) => {
+      mirror("ERROR", args);
+      originalConsoleError(...args);
+    };
+
+    hooked = true;
   }
 }
 
-function push(level: Level, args: any[]) {
-  const text = args.map(stringify).join(" ");
-  const entry: LogEntry = { level, text, time: performance.now(), reveal: 0 };
-  queue.push(entry);
-  if (history.length > MAX_HISTORY)
-    history = history.slice(history.length - MAX_HISTORY);
+/** Restore original console.* */
+export function stopGameLogger() {
+  if (!hooked) return;
+  console.log = originalConsoleLog;
+  console.info = originalConsoleInfo;
+  console.warn = originalConsoleWarn;
+  console.error = originalConsoleError;
+  hooked = false;
 }
 
-export function initGameLogger() {
-  console.log = (...a: any[]) => {
-    original.log.apply(console, a);
-    push("log", a);
-  };
-  console.warn = (...a: any[]) => {
-    original.warn.apply(console, a);
-    push("warn", a);
-  };
-  console.error = (...a: any[]) => {
-    original.error.apply(console, a);
-    push("error", a);
-  };
-  console.info = (...a: any[]) => {
-    original.info.apply(console, a);
-    push("info", a);
-  };
+/** Append a single line (string) to the DOM log */
+export function pushLog(line: string, level: Level = "LOG") {
+  if (!contentEl) createDomPanel();
+  appendLine(String(line ?? ""), level);
 }
 
-function levelColor(s: p5, level: Level) {
-  switch (level) {
-    case "warn":
-      s.fill(120, 90, 10);
-      break;
-    case "error":
-      s.fill(150, 20, 20);
-      break;
-    case "info":
-      s.fill(30, 80, 130);
-      break;
-    default:
-      s.fill(30);
-      break;
-  }
+/** Clear all lines */
+export function clearLog() {
+  if (!contentEl) createDomPanel();
+  contentEl!.innerHTML = "";
+  // reset scroll state
+  userScrolled = false;
 }
 
-function getPanelRect(s: p5, _cfg: any) {
-  const fr: any = (window as any).__fieldRect || null;
-  const panelW = Math.max(260, s.width * 0.28);
-
-  // x — справа от поля, если оно есть; иначе у правого края
-  const x = fr
-    ? Math.min(fr.fieldX + fr.fieldW + 16, s.width - panelW - 16)
-    : s.width - panelW - 16;
-
-  // ВЕРХ ПАНЕЛИ — ВСЕГДА У ВЕРХА ХОЛСТА
-  const y = 16;
-  const w = panelW;
-  const h = s.height - 32;
-
-  return { x, y, w, h };
+/** Toggle or set autofollow (autoscroll). If true, new logs scroll to bottom. */
+export function setAutoFollow(value: boolean) {
+  autoFollow = !!value;
+  updateFollowButton();
+  if (autoFollow) scrollToBottom();
+}
+export function toggleAutoFollow() {
+  setAutoFollow(!autoFollow);
+}
+export function isAutoFollow() {
+  return !!autoFollow;
 }
 
-function stepAnimation(s: p5) {
-  if (!current && queue.length) {
-    current = queue.shift() || null;
-    if (current) current.reveal = 0;
-  }
-  if (!current) return;
+/* ---------------- internal helpers ---------------- */
 
-  const dt = s.deltaTime / 1000;
-  current.reveal = Math.min(
-    current.text.length,
-    current.reveal + CHAR_PER_SEC * dt
+function createDomPanel(attachToSelector?: string) {
+  // inject minimal CSS once
+  injectStyles();
+
+  // create elements
+  const panel = document.createElement("div");
+  panel.className = "cg-log-panel";
+
+  const header = document.createElement("div");
+  header.className = "cg-log-header";
+
+  const title = document.createElement("div");
+  title.className = "cg-log-title";
+  title.textContent = "Game Log";
+
+  headerBtnFollow = document.createElement("button");
+  headerBtnFollow.className = "cg-log-btn";
+  headerBtnFollow.title = "Toggle auto-follow";
+  headerBtnFollow.onclick = () => {
+    userScrolled = false; // if user clicks toggle, treat as returning to follow state
+    toggleAutoFollow();
+  };
+
+  headerBtnClear = document.createElement("button");
+  headerBtnClear.className = "cg-log-btn";
+  headerBtnClear.title = "Clear log";
+  headerBtnClear.textContent = "Clear";
+  headerBtnClear.onclick = () => clearLog();
+
+  header.appendChild(title);
+  header.appendChild(headerBtnFollow);
+  header.appendChild(headerBtnClear);
+
+  contentEl = document.createElement("div");
+  contentEl.className = "cg-log-content";
+  contentEl.setAttribute("role", "log");
+  contentEl.addEventListener(
+    "scroll",
+    () => {
+      if (!contentEl) return;
+      const atBottom =
+        Math.abs(
+          contentEl.scrollTop + contentEl.clientHeight - contentEl.scrollHeight
+        ) < 2;
+      userScrolled = !atBottom;
+      if (atBottom && autoFollow) userScrolled = false;
+      updateFollowButton();
+    },
+    { passive: true }
   );
-  if (current.reveal >= current.text.length) {
-    history.push(current);
-    if (history.length > MAX_HISTORY) {
-      history = history.slice(history.length - MAX_HISTORY);
-    }
-    current = null;
+
+  panel.appendChild(header);
+  panel.appendChild(contentEl);
+
+  // attach panel to DOM: prefer provided parent (e.g. '#canvas-wrap') else body
+  const parent =
+    (attachToSelector && document.querySelector(attachToSelector)) ||
+    document.getElementById("canvas-wrap") ||
+    document.body;
+
+  // Add a marker class to parent so CSS controls layout responsively.
+  // Do NOT set inline styles here — use CSS classes for responsive behavior.
+  if (parent && parent instanceof HTMLElement) {
+    parent.classList.add("cg-with-log");
+  }
+
+  parent.appendChild(panel);
+
+  containerEl = panel;
+  updateFollowButton();
+}
+
+/** Append a single DOM line with minimal markup and color by level */
+function appendLine(text: string, level: Level = "LOG") {
+  if (!contentEl) createDomPanel();
+  const ln = document.createElement("div");
+  ln.className = "cg-log-line cg-log-" + level.toLowerCase();
+  // Use textContent so we keep automatic wrap, and safe from HTML injection
+  ln.textContent = text;
+  contentEl!.appendChild(ln);
+
+  // autoscroll if allowed and user didn't scroll away
+  if (autoFollow && !userScrolled) {
+    scrollToBottom();
   }
 }
 
-/** Перенос текста по словам на заданную ширину. Возвращает массив строк. */
-function wrapText(s: p5, text: string, maxW: number): string[] {
-  if (!text) return [""];
-  const words = text.split(/\s+/);
-  const lines: string[] = [];
-  let line = "";
-
-  const pushLine = () => {
-    lines.push(line);
-    line = "";
-  };
-
-  for (let i = 0; i < words.length; i++) {
-    const word = words[i];
-    const candidate = line ? line + " " + word : word;
-    if (s.textWidth(candidate) <= maxW) {
-      line = candidate;
-    } else {
-      if (line) pushLine();
-      // если слово само шире строки — грубо режем по символам
-      if (s.textWidth(word) > maxW) {
-        let buf = "";
-        for (const ch of word) {
-          const cand = buf + ch;
-          if (s.textWidth(cand) > maxW && buf) {
-            lines.push(buf);
-            buf = ch;
-          } else {
-            buf = cand;
-          }
-        }
-        line = buf; // остаток в текущую строку
-      } else {
-        line = word;
+/** Mirror console args into the panel as one joined line */
+function mirror(level: Level, args: any[]) {
+  try {
+    const parts = args.map((a) => {
+      if (typeof a === "string") return a;
+      try {
+        return JSON.stringify(a);
+      } catch {
+        return String(a);
       }
-    }
+    });
+    appendLine((level ? `[${level}] ` : "") + parts.join(" "), level);
+  } catch (e) {
+    appendLine("[ERROR] (log mirror failed) " + String(e), "ERROR");
   }
-  if (line) pushLine();
-  return lines;
 }
 
-/** Высота блока текста (с учётом переносов), px */
-function measureTextBlockHeight(
-  s: p5,
-  text: string,
-  maxW: number
-): { lines: string[]; height: number } {
-  const baseLine = s.textAscent() + s.textDescent();
-  const lineH = baseLine * LINE_HEIGHT_EM;
-  const lines = wrapText(s, text, maxW);
-  return { lines, height: lines.length * lineH };
+/** scroll content to bottom */
+function scrollToBottom() {
+  if (!contentEl) return;
+  // schedule to next animation frame so layout settles
+  requestAnimationFrame(() => {
+    if (!contentEl) return;
+    contentEl.scrollTop = contentEl.scrollHeight;
+    userScrolled = false;
+    updateFollowButton();
+  });
 }
 
-export function drawLogPanel(s: p5, cfg: any) {
-  stepAnimation(s);
-  const { x, y, w, h } = getPanelRect(s, cfg);
+function updateFollowButton() {
+  if (!headerBtnFollow) return;
+  headerBtnFollow.textContent =
+    autoFollow && !userScrolled
+      ? "Follow ON"
+      : autoFollow && userScrolled
+      ? "Follow ON*"
+      : "Follow OFF";
+  headerBtnFollow.style.background = autoFollow ? "#3c3" : "#777";
+  headerBtnFollow.style.color = autoFollow ? "#000" : "#fff";
+}
 
-  s.push();
-  s.noStroke();
-  s.fill(255, 255, 255, 220);
-  s.rect(x, y, w, h, 10);
-  s.stroke(0, 0, 0, 60);
-  s.noFill();
-  s.rect(x, y, w, h, 10);
-
-  s.noStroke();
-  s.fill(20);
-  s.textAlign(s.LEFT, s.TOP);
-  s.textSize(14);
-  s.text("LOG", x + PADDING, y + PADDING);
-
-  const contentX = x + PADDING;
-  const contentY = y + PADDING + 24; // сразу под заголовком
-  const contentW = w - PADDING * 2;
-  const contentH = h - (contentY - y) - PADDING;
-
-  // clip
-  (s as any).drawingContext.save();
-  (s as any).drawingContext.beginPath();
-  (s as any).drawingContext.rect(contentX, contentY, contentW, contentH);
-  (s as any).drawingContext.clip();
-
-  s.textSize(12);
-  s.textAlign(s.LEFT, s.TOP);
-
-  const lineH = (s.textAscent() + s.textDescent()) * 1.2;
-  let cursorY = contentY;
-
-  // рисуем ИСТОРИЮ сверху вниз (берём только хвост, который помещается)
-  const linesFrom = Math.max(0, history.length - 200);
-  for (let i = linesFrom; i < history.length; i++) {
-    const e = history[i];
-    levelColor(s, e.level);
-
-    const lines = e.wrapped ?? wrapText(s, e.text, contentW);
-    // если следующая запись не влезает — выходим
-    if (cursorY + lines.length * lineH > contentY + contentH) break;
-
-    for (const ln of lines) {
-      s.text(ln, contentX, cursorY);
-      cursorY += lineH;
-    }
-    cursorY += 4; // небольшой зазор
+function injectStyles() {
+  if (document.getElementById("cg-log-panel-style")) return;
+  const css = `
+  /* Panel */
+  .cg-log-panel {
+    width: 60%;    
+    max-height: 840px;
+    background: #0f0f10;
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    color: #eee;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+    box-sizing: border-box;
+    flex: 0 0 auto;
   }
 
-  // текущая строка — в самом конце списка
-  if (current && cursorY < contentY + contentH) {
-    levelColor(s, current.level);
-    const shown = current.text.slice(0, Math.floor(current.reveal));
-    const curLines = wrapText(s, shown, contentW);
-    for (const ln of curLines) {
-      if (cursorY + lineH > contentY + contentH) break;
-      s.text(ln, contentX, cursorY);
-      cursorY += lineH;
+  .cg-log-header {
+    display:flex;
+    gap:8px;
+    align-items:center;
+    justify-content: space-between;
+    margin-bottom:8px;
+  }
+  .cg-log-title { font-weight:600; font-size:14px; }
+  .cg-log-btn {
+    background:#222; color:#eee;
+    border:1px solid rgba(255,255,255,0.06);
+    padding:6px 8px; border-radius:6px; cursor:pointer; font-size:12px;
+  }
+
+  .cg-log-content {
+    overflow:auto;
+    flex: 1 1 auto;
+    padding:6px;
+    border-radius:6px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.01), transparent);
+    box-sizing:border-box;
+  }
+  .cg-log-line {
+    white-space: normal;
+    word-break: break-word;
+    font-size: 13px;
+    line-height: 1.35;
+    margin-bottom:4px;
+  }
+  .cg-log-log { color: #e6e6e6; }
+  .cg-log-info { color: #9fdcff; }
+  .cg-log-warn { color: #ffd58a; }
+  .cg-log-error { color: #ff9b9b; font-weight:600; }
+
+  /* Parent hook: when panel is attached to #canvas-wrap (or custom parent),
+     we use flex layout so canvas and panel sit side-by-side on wide screens. */
+  #canvas-wrap.cg-with-log {
+    display: flex !important;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  /* If attachToSelector was another element, we also support generic class */
+  .cg-with-log {
+    display: flex !important;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  /* Responsive: on narrow screens stack column-wise: canvas on top, panel below */
+  @media (max-width: 900px) {
+    #canvas-wrap.cg-with-log,
+    .cg-with-log {
+      flex-direction: column !important;
+      align-items: stretch;
+    }
+    /* make panel full-width under canvas on mobile */
+    .cg-log-panel {
+      width: 100% !important;
+      max-height: 260px !important;
+      margin-top: 8px;
+    }
+    /* ensure canvas does not overflow horizontally on mobile */
+    #canvas-wrap canvas {
+      max-width: 100%;
+      height: auto;
     }
   }
 
-  (s as any).drawingContext.restore();
-  s.pop();
+  /* smaller screens tweaks */
+  @media (max-width: 480px) {
+    .cg-log-panel { padding: 6px; max-height: 220px; }
+    .cg-log-btn { padding: 5px 6px; font-size: 11px; }
+    .cg-log-title { font-size: 13px; }
+  }
+  `;
+  const st = document.createElement("style");
+  st.id = "cg-log-panel-style";
+  st.appendChild(document.createTextNode(css));
+  document.head.appendChild(st);
+}
+
+/* Export helper to create panel at custom place */
+export function createPanelAt(selector: string) {
+  createDomPanel(selector);
+}
+
+/* small utility to ensure panel exists and return its element */
+export function getPanelElement() {
+  if (!containerEl) createDomPanel();
+  return containerEl;
 }

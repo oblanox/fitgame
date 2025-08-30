@@ -1,12 +1,18 @@
 // Общие типы, которые нужны и main.ts, и animations.ts
 export type ElementKey = "earth" | "fire" | "water" | "cosmos" | "none";
 
-export type Padding = { left: number; right: number; top: number; bottom: number };
+export type Padding = {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+};
 
 export type FieldCfg = {
   bg?: string;
   line?: string;
   rows?: number;
+  anchor?: string;
   widthRatio?: number;
   padding?: Padding;
   lineInsetTop?: number;
