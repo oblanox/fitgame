@@ -1,6 +1,18 @@
 // Общие типы, которые нужны и main.ts, и animations.ts
 export type ElementKey = "earth" | "fire" | "water" | "cosmos" | "none";
 
+export type GameRules = {
+  shiftMs?: number;
+  chainGapMs?: number;
+  outMs?: number;
+  hitMs?: number;
+  backMs?: number;
+  dropPx?: number;
+  deathMs?: number;
+  retaliationMul?: number;
+  bossRetaliationMul?: number;
+};
+
 export type Padding = {
   left: number;
   right: number;
@@ -79,7 +91,7 @@ export type Cfg = {
   weapons: WeaponCfg[];
   elementMatrix?: ElementMatrixCfg;
   // произвольные правила, которые использовала анимация
-  rules?: Record<string, number | string>;
+  rules?: GameRules;
 };
 
 /**

@@ -35,6 +35,9 @@ import {
   drawHpImpactOverlay,
   getEnemyYOffset,
   queueEnemyRetaliationToHp,
+  startEnemyDeath,
+  nowMs,
+  easeInOutQuad,
 } from "./animations";
 import {
   Cfg,
@@ -240,21 +243,69 @@ function getRowYs(
   return Array.from({ length: rowsCount }, (_, i) => y0 - i * step);
 }
 
-function layoutEnemies() {
-  if (!cfg) return;
+// layoutEnemies: если передан список listEnemies, вычисляет и присваивает позиции только для него (не мутируя глобал),
+// возвращает массив { id, x, y } для использования как target positions.
+// Если listEnemies omitted — модифицирует глобальный enemies (старое поведение).
+function layoutEnemies(listEnemies?: Enemy[]) {
+  if (!cfg) return [];
+
+  console.log("[LOG] layoutEnemies called");
+  const arr = listEnemies ?? enemies;
   const rect = getFieldRect();
   const rows = Math.max(2, cfg.field!.rows ?? 5);
   const rowYs = getRowYs(rows, rect, cfg.field!);
   const xAt = (col: number) => rect.fieldX + clamp(col, 0, 1) * rect.fieldW;
 
-  for (const e of enemies) {
+  const targets: { id: number; x: number; y: number }[] = [];
+
+  for (const e of arr) {
     const rowIdx = clamp(e.row, 1, rows) - 1;
     const baseY = rowYs[rowIdx] + (e.lineOffset ?? 0);
     const minY = rect.fieldY + e.r;
     const maxY = rect.fieldY + rect.fieldH - e.r;
-    e.x = xAt(e.col);
-    e.y = clamp(baseY, minY, maxY);
+    const tx = xAt(e.col);
+    const ty = clamp(baseY, minY, maxY);
+    targets.push({ id: e.id as number, x: tx, y: ty });
+
+    // Apply positions
+    e.x = tx;
+    e.y = ty;
+
+    console.log(
+      "[LOG] Enemy",
+      e.id,
+      "positioned at row",
+      e.row,
+      "col",
+      e.col,
+      "->",
+      tx,
+      ty
+    );
   }
+
+  console.log("After layout", arr);
+  return targets;
+}
+
+function advanceFormationIfNeeded() {
+  // Check if front row is empty
+  const frontRow = 1;
+  const hasFrontRow = enemies.some((e) => e.row === frontRow);
+  console.log(
+    "[LOG] advanceFormationIfNeeded - front row empty:",
+    !hasFrontRow
+  );
+
+  if (!hasFrontRow) {
+    console.log("[LOG] Advancing formation - moving all rows forward");
+    for (const e of enemies) {
+      e.row = Math.max(1, e.row - 1);
+    }
+    console.log("After advancement", enemies);
+    return true;
+  }
+  return false;
 }
 
 /* ────────────── HUD ────────────── */
@@ -354,13 +405,14 @@ function computeSingleHit(
     : getElemCoef(matrix ?? defaultElementMatrix, element, target.element);
   const coef = baseCoef * coefMul;
 
-  const posIdx = Math.max(1, Math.min(4, target.row));
-  const { missPct } = getMissForWeapon(weapon, posIdx, luck);
+  const posIdx = Math.max(1, Math.min(4, Number(target.row ?? 1)));
+
+  // compute miss ONCE (was called twice before)
+  const { missPct, didMiss } = getMissForWeapon(weapon, posIdx, luck);
 
   const baseRoll = rollByLuck(pureMin, pureMax, luck);
   const { didCrit, critMul } = getCritFromLuck(luck);
   const rolledVsElem = Math.round(baseRoll * coef * critMul);
-  const { didMiss } = getMissForWeapon(weapon, posIdx, luck);
   const finalDamage = didMiss ? 0 : rolledVsElem;
 
   console.log(
@@ -378,11 +430,86 @@ function computeSingleHit(
     ].join(" | ")
   );
 
-  return { finalDamage };
+  return { finalDamage, didMiss, didCrit, critMul, baseRoll, missPct };
 }
 
 function applyDamage(target: Enemy, dmg: number) {
   target.hp = Math.max(0, target.hp - dmg);
+}
+/**
+ * Запустить death-анимации для списка мёртвых врагов и, когда все завершатся,
+ * удалить их из глобального enemies[] и выполнить единый shift/пересчёт позиций.
+ */
+function orchestrateAtomicDeaths(deadList: Enemy[]) {
+  if (!cfg) return;
+  if (!deadList || deadList.length === 0) return;
+
+  console.log(
+    "[LOG] orchestrateAtomicDeaths called, deadList=",
+    deadList.map((d) => d.id)
+  );
+  console.log("Rows before death", enemies);
+
+  const uniq = Array.from(
+    new Map(deadList.map((d) => [d.id, d])).values()
+  ) as Enemy[];
+  const total = uniq.length;
+  let finished = 0;
+  const deadIds = uniq.map((d) => d.id as number);
+
+  const shiftMs = 360;
+
+  const onOneDone = (dead: Enemy) => {
+    finished++;
+    console.log(
+      "[LOG] onOneDone for",
+      dead.id,
+      "finished:",
+      finished,
+      "total:",
+      total
+    );
+
+    if (finished >= total) {
+      console.log("[LOG] All deaths finished, removing enemies");
+
+      // Remove dead enemies
+      for (const id of deadIds) {
+        const idx = enemies.findIndex((e) => e.id === id);
+        if (idx >= 0) {
+          console.log("[LOG] Removing enemy", id);
+          enemies.splice(idx, 1);
+        }
+      }
+
+      console.log("Rows after removal", enemies);
+
+      // Advance formation if front row is empty
+      const advanced = advanceFormationIfNeeded();
+      console.log("[LOG] Formation advanced:", advanced);
+
+      // Recalculate layout
+      console.log("[LOG] Calling layoutEnemies");
+      const newTargets = layoutEnemies();
+
+      // Animate shift
+      console.log("[LOG] Calling animateShiftToPositions");
+      animateShiftToPositions(newTargets, shiftMs);
+
+      updateHud();
+      console.log("Final rows", enemies);
+    }
+  };
+
+  for (const e of uniq) {
+    console.log("[LOG] Starting death for", e.id);
+    try {
+      startEnemyDeath(cfg!, e, onOneDone);
+    } catch (err) {
+      console.error("startEnemyDeath failed for", e, err);
+      onOneDone(e);
+    }
+  }
 }
 
 function performHit(
@@ -408,6 +535,9 @@ function performHit(
     (cfg?.elementMatrix as ElementMatrixCfg) ??
     defaultElementMatrix;
 
+  // We'll collect killed enemies here and run atomic deletion after animations are done
+  const deadList: Enemy[] = [];
+
   if (ability === "ab8") {
     const ORDER = opts.cycleOrder ?? ["earth", "fire", "water", "cosmos"];
     const fromEl = target.element;
@@ -429,13 +559,20 @@ function performHit(
     return { type: "ab8", from: fromEl, to: toEl, cost };
   }
 
+  // ab5 / ab6 / ab7 (multi-target): unify hits array
   if (ability === "ab5" || ability === "ab6" || ability === "ab7") {
     const superEl: ElementKey =
       ability === "ab5" ? "fire" : ability === "ab6" ? "earth" : "water";
-    const results: number[] = [];
+    const hitsArr: { id: number; damage: number; didMiss: boolean }[] = [];
+
     const r1 = computeSingleHit(player, weapon, target, M, superEl);
     applyDamage(target, r1.finalDamage);
-    results.push(r1.finalDamage);
+    hitsArr.push({
+      id: target.id,
+      damage: r1.finalDamage,
+      didMiss: !!r1.didMiss,
+    });
+    if (target.hp <= 0) deadList.push(target);
 
     let second: Enemy | null = null;
     if (ability === "ab5") {
@@ -469,18 +606,33 @@ function performHit(
       const coefMul = opts.secondCoef ?? 1.0;
       const r2 = computeSingleHit(player, weapon, second, M, superEl, coefMul);
       applyDamage(second, r2.finalDamage);
-      results.push(r2.finalDamage);
-    } else {
-      console.log(`${ability}: второй цели нет`);
+      hitsArr.push({
+        id: second.id,
+        damage: r2.finalDamage,
+        didMiss: !!r2.didMiss,
+      });
+      if (second.hp <= 0) deadList.push(second);
     }
 
     hitsLeft = Math.max(0, hitsLeft - 1);
-    const total = results.reduce((s, x) => s + x, 0);
-    console.log(`${ability}: total=${total} | ходы=-1`);
+    const total = hitsArr.reduce((s, x) => s + x.damage, 0);
     updateHud();
-    return { type: ability, total, count: results.length };
+
+    // запуск атомарной обработки смертей (если есть)
+    if (deadList.length > 0) {
+      orchestrateAtomicDeaths(deadList);
+    }
+
+    console.log("performHit result:", {
+      type: ability,
+      total,
+      count: hitsArr.length,
+      hits: hitsArr,
+    });
+    return { type: ability, total, count: hitsArr.length, hits: hitsArr };
   }
 
+  // point (single-target) unified
   if (ability === "point") {
     const el = opts.element ?? "none";
     const r = computeSingleHit(player, weapon, target, M, el);
@@ -488,14 +640,31 @@ function performHit(
     hitsLeft = Math.max(0, hitsLeft - 1);
     console.log(`POINT ${el}: dmg=${r.finalDamage} | ходы=-1`);
     updateHud();
-    return { type: "point", element: el, damage: r.finalDamage };
+
+    const hitsArr = [
+      { id: target.id, damage: r.finalDamage, didMiss: !!r.didMiss },
+    ];
+    const total = hitsArr.reduce((s, x) => s + x.damage, 0);
+    if (target.hp <= 0) deadList.push(target);
+    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
+
+    return { type: "point", total, hits: hitsArr };
   } else {
+    // ab0
     const r = computeSingleHit(player, weapon, target, M, "none");
     applyDamage(target, r.finalDamage);
     hitsLeft = Math.max(0, hitsLeft - 1);
     console.log(`AB0: dmg=${r.finalDamage} | ходы=-1`);
     updateHud();
-    return { type: "ab0", damage: r.finalDamage };
+
+    const hitsArr = [
+      { id: target.id, damage: r.finalDamage, didMiss: !!r.didMiss },
+    ];
+    const total = hitsArr.reduce((s, x) => s + x.damage, 0);
+    if (target.hp <= 0) deadList.push(target);
+    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
+
+    return { type: "ab0", total, hits: hitsArr };
   }
 }
 
@@ -557,9 +726,17 @@ const sketch = (s: p5) => {
     }
 
     for (const e of enemies) {
+      const ds = Number((e as any).__deadScale ?? 1);
+      const da = Number((e as any).__deadAlpha ?? 1);
+      s.push();
+      s.translate(e.x, e.y + getEnemyYOffset(e));
+      s.scale(ds, ds);
       s.noStroke();
       s.fill(ELEMENT_COLOR[e.element]);
-      s.circle(e.x, e.y + getEnemyYOffset(e), e.r * 2);
+      s.drawingContext.globalAlpha = da;
+      s.circle(0, 0, e.r * 2);
+      s.drawingContext.globalAlpha = 1;
+      s.pop();
 
       if (hoveredId === e.id) {
         s.noFill();
@@ -713,14 +890,16 @@ const sketch = (s: p5) => {
       result.type !== "ab8" &&
       result.type !== "skip"
     ) {
-      // теперь оркеструем анимацию через анимированный модуль (он уменьшит HP в пике)
-      queueEnemyRetaliationToHp(
-        cfg,
-        enemy,
-        enemies,
-        { reason: "counter", totalDamage: 1 },
-        "t1"
-      );
+      const totalDamage = (result as any).total ?? 0;
+      // hits — массив с деталями по каждой цели (если есть)
+      const hitsArray = (result as any).hits ?? [
+        { id: enemy.id, damage: (result as any).damage ?? totalDamage },
+      ];
+
+      const ctx = { reason: "counter", totalDamage, hits: hitsArray };
+      const rule = (weapon.retaliationRule as "t1" | "t2" | "t3") ?? "t1";
+
+      queueEnemyRetaliationToHp(cfg, enemy, enemies, ctx, rule);
     }
 
     console.log("Результат удара:", result);
@@ -728,6 +907,38 @@ const sketch = (s: p5) => {
   };
 };
 
+/**
+ * Плавно сдвигаем элементы enemies к целевым позициям targetPos (array of {id,x,y}).
+ * duration в ms.
+ */
+function animateShiftToPositions(
+  targetPos: { id: number; x: number; y: number }[],
+  duration = 360
+) {
+  const startPositions = new Map<number, { x: number; y: number }>();
+  for (const e of enemies) {
+    startPositions.set(e.id as number, { x: e.x, y: e.y });
+  }
+  const start = nowMs();
+
+  function tick() {
+    const t = nowMs();
+    const k = Math.min(1, (t - start) / duration);
+    const ease = easeInOutQuad(k);
+
+    for (const tp of targetPos) {
+      const e = enemies.find((x) => x.id === tp.id);
+      if (!e) continue;
+      const startP = startPositions.get(tp.id) ?? { x: e.x, y: e.y };
+      e.x = lerp(startP.x, tp.x, ease);
+      e.y = lerp(startP.y, tp.y, ease);
+    }
+
+    if (k < 1) requestAnimationFrame(tick);
+  }
+
+  requestAnimationFrame(tick);
+}
 /* ────────────── Утилиты: селекты и иконка оружия ────────────── */
 function getSelectedWeaponCfg(): WeaponCfg | null {
   if (!cfg?.weapons) return null;

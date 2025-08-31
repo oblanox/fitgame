@@ -150,5 +150,17 @@
     }
   },
 
-  "timer": { "turns": 10, "regen": { "minionPct": 0.1, "bossPct": 0.1 } }
+  "timer": { "turns": 10, "regen": { "minionPct": 0.1, "bossPct": 0.1 } },
+
+  "rules": {
+    "shiftMs": 360,
+    "chainGapMs": 120,
+    "outMs": 240,
+    "hitMs": 120,
+    "backMs": 260,
+    "dropPx": 26,
+    "deathMs": 420,
+    "retaliationMul": 0.5,
+    "bossRetaliationMul": 0.75
+  }
 }

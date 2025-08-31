@@ -29,13 +29,13 @@ const hpImpacts: HpImpact[] = [];
 let hpBarY = 0;
 let hpBarSet = false;
 
-function nowMs() {
+export function nowMs() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 function lerp(a: number, b: number, k: number) {
   return a + (b - a) * k;
 }
-function easeInOutQuad(t: number) {
+export function easeInOutQuad(t: number) {
   t = Math.max(0, Math.min(1, t));
   return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 }
@@ -85,39 +85,104 @@ export function queueEnemyRetaliationToHp(
   cfg: Cfg,
   target: Enemy,
   all: Enemy[],
-  ctx: { reason: string; totalDamage?: number },
+  ctx: {
+    reason: string;
+    totalDamage?: number;
+    hits?: { id: number; damage: number; didMiss?: boolean }[];
+  },
   rule: "t1" | "t2" | "t3" = "t1"
 ) {
   if (!cfg?.player || !target || target.hp <= 0) return;
 
   const row = Number(target.row ?? 1);
-  let list: Enemy[] = [];
+
+  // candidates as before (rule t1/t2/t3 and boss special-case)
+  let candidates: Enemy[] = [];
+  // --- build candidates by rule ---
   switch (rule) {
     case "t1":
-      list = [target];
+      candidates = [target];
       break;
     case "t2": {
-      list = [target];
+      // target + nearest alive in same row (if any)
+      candidates = [target];
       const sameRow = all
         .filter((e) => e !== target && e.hp > 0 && Number(e.row ?? row) === row)
         .sort(
           (a, b) =>
-            Math.abs((a as any).col - (target as any).col) -
-            Math.abs((b as any).col - (target as any).col)
+            Math.hypot(a.x - target.x, a.y - target.y) -
+            Math.hypot(b.x - target.x, b.y - target.y)
         );
-      if (sameRow[0]) list.push(sameRow[0]);
+      if (sameRow[0]) candidates.push(sameRow[0]);
       break;
     }
     case "t3":
-      list = all.filter((e) => e.hp > 0 && Number(e.row ?? row) === row);
+      // all alive in same row
+      candidates = all.filter((e) => e.hp > 0 && Number(e.row ?? row) === row);
       break;
+    default:
+      candidates = [target];
   }
 
-  list = list.filter((e) => !animByEnemy.get(e));
-  const rules: any = (cfg as any).rules ?? {};
-  const gap = Number(rules.chainGapMs ?? 120);
+  // boss special-case: if you attacked the boss, the spec says many/all minions may respond
+  if (target.kind === "boss") {
+    // decide: make all minions (alive) candidates
+    const allMinions = all.filter((e) => e.kind === "minion" && e.hp > 0);
+    if (allMinions.length > 0) candidates = allMinions;
+  }
 
-  list.forEach((e, i) => {
+  // Build hits map for quick lookup
+  // --- include actual-hit targets into candidates (so hits outside rule still can retaliate) ---
+  if (Array.isArray(ctx.hits) && ctx.hits.length > 0) {
+    for (const h of ctx.hits) {
+      const eid = h.id;
+      const eobj = all.find((x) => x.id === eid);
+      if (eobj && eobj.hp > 0 && !candidates.includes(eobj)) {
+        candidates.push(eobj);
+      }
+    }
+  }
+
+  // build hitsMap for filtering
+  const hitsMap = new Map<number, { damage: number; didMiss?: boolean }>();
+  if (Array.isArray(ctx.hits)) {
+    for (const h of ctx.hits)
+      hitsMap.set(h.id, { damage: h.damage ?? 0, didMiss: !!h.didMiss });
+  }
+
+  // Пример строгой фильтрации пассивных: требуем факт попадания (didMiss=false) и damage>0
+  const filtered: Enemy[] = [];
+  const seen = new Set<number | string>();
+  for (const e of candidates) {
+    if (!e || e.hp <= 0) continue;
+    if (animByEnemy.get(e)) continue;
+
+    const eid = e.id ?? `${e.kind}_${e.row}_${e.col}`;
+    if (seen.has(eid)) continue;
+    seen.add(eid);
+
+    if (e.kind === "minion") {
+      const mtype = Number(e.type ?? 1);
+      if (mtype === 1) {
+        // aggressive -> always respond (if in candidates)
+        filtered.push(e);
+      } else if (mtype === 2) {
+        // passive -> only if actually hit (strict)
+        const entry = hitsMap.get(e.id);
+        const didActuallyHit =
+          !!entry && entry.didMiss === false && (entry.damage ?? 0) > 0;
+        if (didActuallyHit) filtered.push(e);
+      } else {
+        filtered.push(e);
+      }
+    } else {
+      filtered.push(e);
+    }
+  }
+
+  // schedule animations as before
+  const gap = cfg?.rules?.chainGapMs ?? 120;
+  filtered.forEach((e, i) => {
     setTimeout(() => startEnemyDiveToHp(cfg, e, ctx), i * gap);
   });
 }
@@ -264,4 +329,127 @@ function applyEnemyDamageToPlayer(
   console.log(
     `[retaliation→HP] enemy=${enemy.id ?? "?"} dmg=${dmg} reason=${ctx.reason}`
   );
+}
+
+/* ------------------ Death animation & utilities ------------------ */
+
+/**
+ * Начать анимацию смерти врага (уменьшение/фейд) и вызвать onComplete когда завершится.
+ * - cfg: конфиг (для правил/таймингов)
+ * - enemy: цель
+ * - onComplete: callback, вызывается после того как enemy визуально исчез (в main удалим объект и пересчитаем layout)
+ */
+// Замена функции startEnemyDeath в animations.ts
+export function startEnemyDeath(
+  cfg: Cfg,
+  enemy: Enemy,
+  onComplete?: (enemy: Enemy) => void,
+  // внутренние опции для retry — не обязательно передавать извне
+  _opts?: { retryDelayMs?: number; maxRetries?: number; _attempt?: number }
+) {
+  const retryDelayMs = _opts?.retryDelayMs ?? 40;
+  const maxRetries = _opts?.maxRetries ?? 50;
+  const attempt = (_opts?._attempt ?? 0) + 1;
+
+  console.log("[LOG] startEnemyDeath for", enemy?.id, "attempt", attempt);
+
+  if (!enemy) {
+    console.log("[LOG] startEnemyDeath invalid enemy", enemy);
+    if (onComplete) onComplete(enemy);
+    return;
+  }
+
+  // Если уже есть анимация (animByEnemy) — попробуем подождать и повторить
+  if (animByEnemy.get(enemy)) {
+    console.log(
+      "[LOG] startEnemyDeath: enemy",
+      enemy.id,
+      "is currently animating, will retry",
+      attempt,
+      "of",
+      maxRetries
+    );
+    if (attempt >= maxRetries) {
+      console.warn(
+        "[WARN] startEnemyDeath: max retries reached for",
+        enemy.id,
+        "- calling onComplete to avoid hang"
+      );
+      if (onComplete) onComplete(enemy);
+      return;
+    }
+    // отложенный повтор (с увеличивающимся количеством попыток)
+    setTimeout(
+      () =>
+        startEnemyDeath(cfg, enemy, onComplete, {
+          retryDelayMs,
+          maxRetries,
+          _attempt: attempt,
+        }),
+      retryDelayMs
+    );
+    return;
+  }
+
+  // Теперь — нормальный запуск death-анимации (как было)
+  const rules: any = (cfg as any).rules ?? {};
+  const deathMs = Number(rules.deathMs ?? 420);
+
+  // Mark as dying
+  (enemy as any).__dead = true;
+  (enemy as any).__deadStart = nowMs();
+  (enemy as any).__deadMs = deathMs;
+
+  // используем animByEnemy как флаг/контейнер, чтобы не мешать dive-анимациям
+  const st: EnemyAnimState = {
+    phase: "down",
+    t0: nowMs(),
+    downMs: deathMs,
+    hitMs: 0,
+    upMs: 0,
+    startY: Number(enemy.y ?? 0),
+    targetY: Number(enemy.y ?? 0),
+    dmgApplied: true,
+  };
+  animByEnemy.set(enemy, st);
+
+  const start = nowMs();
+  const tick = () => {
+    const t = nowMs();
+    const k = Math.min(1, (t - start) / deathMs);
+
+    console.log("[LOG] Death animation progress for", enemy.id, ":", k);
+
+    (enemy as any).__deadScale = 1 - easeInOutQuad(k);
+    (enemy as any).__deadAlpha = 1 - k;
+
+    if (k >= 0.15 && !(enemy as any).__deathImpactPushed) {
+      (enemy as any).__deathImpactPushed = true;
+      hpImpacts.push({
+        x: enemy.x ?? 0,
+        y: hpBarSet ? hpBarY : (enemy.y ?? 0) + 20,
+        r0: 8,
+        r1: 56,
+        t0: t,
+        ms: Math.max(220, 360),
+      });
+    }
+
+    if (k < 1) {
+      requestAnimationFrame(tick);
+    } else {
+      console.log("[LOG] startEnemyDeath DONE for", enemy.id);
+      animByEnemy.delete(enemy);
+      (enemy as any).__deadScale = 0;
+      (enemy as any).__deadAlpha = 0;
+      if (onComplete) {
+        console.log("[LOG] Calling onComplete for", enemy.id);
+        onComplete(enemy);
+      } else {
+        console.log("[LOG] No onComplete provided for", enemy.id);
+      }
+    }
+  };
+
+  requestAnimationFrame(tick);
 }
