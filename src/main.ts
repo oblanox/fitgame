@@ -1,7 +1,6 @@
-﻿// src/main.ts
+﻿// src/main.ts (refactored)
+// основной UI/логика — оптимизированная и менее шумная версия
 import p5 from "p5";
-
-/* UI-модули (оставляем как есть) */
 import { drawHpStatus } from "./ui/hp_status";
 import {
   drawWeaponPanel,
@@ -29,7 +28,6 @@ import {
 } from "./ui/abilities";
 import { initGameLogger } from "./ui/log_panel";
 
-/* Импорты из вынесённых файлов */
 import {
   setHpBarY,
   drawHpImpactOverlay,
@@ -48,7 +46,10 @@ import {
   WeaponCfg,
 } from "./types";
 
-/* ────────────── Константы / хелперы ────────────── */
+/* ---------- CONFIG / FLAGS ---------- */
+const DEBUG = false;
+
+/* ---------- HELPERS & CONSTANTS ---------- */
 const ELEMENT_COLOR: Record<ElementKey, string> = {
   earth: "#129447",
   fire: "#E53935",
@@ -56,7 +57,6 @@ const ELEMENT_COLOR: Record<ElementKey, string> = {
   cosmos: "#8E24AA",
   none: "#FFFFFF",
 };
-
 const ELEMENT_ALIAS: Record<string, ElementKey> = {
   earth: "earth",
   fire: "fire",
@@ -66,30 +66,22 @@ const ELEMENT_ALIAS: Record<string, ElementKey> = {
   cold: "water",
 };
 
-function toElementKey(s: string): ElementKey {
+const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
+const lerp = (a: number, b: number, k: number) => a + (b - a) * k;
+
+function toElementKey(s: string | undefined): ElementKey {
   const k = (s ?? "").toLowerCase();
   return ELEMENT_ALIAS[k] ?? "earth";
 }
-const clamp = (n: number, a: number, b: number) => Math.max(a, Math.min(b, n));
-function lerp(a: number, b: number, k: number) {
-  return a + (b - a) * k;
-}
 
-/* ────────────── Состояние игры (UI/логика в main) ────────────── */
+/* ---------- STATE ---------- */
 let cfg: Cfg | null = null;
 let selectedWeaponId = 1;
 let hitsLeft = 0;
 let playerHp = 0;
-
 let enemies: Enemy[] = [];
 
-/* Вспомогательные: анимации используют getEnemyYOffset() из animations.ts */
-function setEnemyYOffsetLocal(e: Enemy, off: number) {
-  // оставляем, если в проекте где-то напрямую меняется поле yOffset
-  (e as any).yOffset = off;
-}
-
-/* ────────────── Конфиг/инициализация ────────────── */
+/* ---------- DEFAULTS ---------- */
 const defaultElementMatrix: ElementMatrixCfg = {
   earth: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
   fire: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
@@ -98,12 +90,14 @@ const defaultElementMatrix: ElementMatrixCfg = {
   none: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
 };
 
+/* ---------- CONFIG LOAD / RESET ---------- */
 async function loadConfig(url = "/config.json") {
   try {
     const r = await fetch(url, { cache: "no-store" });
     cfg = (await r.json()) as Cfg;
   } catch (e) {
     console.error("config load failed, using fallback", e);
+    // minimal fallback (keeps the structure expected elsewhere)
     cfg = {
       field: {
         bg: "#F9EDD6",
@@ -193,36 +187,26 @@ function resetSession() {
     lineOffset: cfg.boss.lineOffset ?? 0,
   });
 
-  layoutEnemies();
+  layoutEnemies(); // positions initial
   updateHud();
 }
 
-/* ────────────── Геометрия и рендеринг поля ────────────── */
+/* ---------- GEOMETRY & LAYOUT ---------- */
 function getFieldRect() {
+  // kept constants from original; you can adapt to canvas size later
   const W = 960,
-    H = 540; // оставляем прежние canvas dims, если у тебя другие — подправь
+    H = 540;
   const f = cfg!.field!;
   const fieldW = Math.floor(W * clamp(f.widthRatio ?? 0.35, 0, 1));
   const fieldH = H - (f.padding?.top ?? 40) - (f.padding?.bottom ?? 120);
-
-  // читаем anchor из конфига: 'left' | 'center' | 'right' (по умолчанию center — поведение как раньше)
   const anchor = (f.anchor as string) ?? "center";
-
-  // отступ слева/справа из padding (если передаёшь padding.left в конфиге — учтём)
   const padLeft = Number(f.padding?.left ?? 0);
   const padRight = Number(f.padding?.right ?? 0);
 
   let fieldX = 0;
-  if (anchor === "left") {
-    // прижатие к левому краю canvas с учётом padding.left
-    fieldX = padLeft;
-  } else if (anchor === "right") {
-    // прижатие к правому краю canvas с учётом padding.right
-    fieldX = Math.max(0, W - fieldW - padRight);
-  } else {
-    // center (поведение по умолчанию)
-    fieldX = Math.floor((W - fieldW) / 2);
-  }
+  if (anchor === "left") fieldX = padLeft;
+  else if (anchor === "right") fieldX = Math.max(0, W - fieldW - padRight);
+  else fieldX = Math.floor((W - fieldW) / 2);
 
   const fieldY = f.padding?.top ?? 40;
   return { fieldX, fieldY, fieldW, fieldH };
@@ -243,13 +227,13 @@ function getRowYs(
   return Array.from({ length: rowsCount }, (_, i) => y0 - i * step);
 }
 
-// layoutEnemies: если передан список listEnemies, вычисляет и присваивает позиции только для него (не мутируя глобал),
-// возвращает массив { id, x, y } для использования как target positions.
-// Если listEnemies omitted — модифицирует глобальный enemies (старое поведение).
+/**
+ * layoutEnemies:
+ * - если передан список listEnemies — вычисляет и возвращает целевые позиции для него (и применяет позиции)
+ * - если без аргумента — применяет к глобальному enemies
+ */
 function layoutEnemies(listEnemies?: Enemy[]) {
   if (!cfg) return [];
-
-  console.log("[LOG] layoutEnemies called");
   const arr = listEnemies ?? enemies;
   const rect = getFieldRect();
   const rows = Math.max(2, cfg.field!.rows ?? 5);
@@ -265,50 +249,27 @@ function layoutEnemies(listEnemies?: Enemy[]) {
     const maxY = rect.fieldY + rect.fieldH - e.r;
     const tx = xAt(e.col);
     const ty = clamp(baseY, minY, maxY);
-    targets.push({ id: e.id as number, x: tx, y: ty });
 
-    // Apply positions
     e.x = tx;
     e.y = ty;
+    targets.push({ id: e.id as number, x: tx, y: ty });
 
-    console.log(
-      "[LOG] Enemy",
-      e.id,
-      "positioned at row",
-      e.row,
-      "col",
-      e.col,
-      "->",
-      tx,
-      ty
-    );
+    if (DEBUG) console.log("[layout] enemy", e.id, "->", tx, ty);
   }
-
-  console.log("After layout", arr);
   return targets;
 }
 
 function advanceFormationIfNeeded() {
-  // Check if front row is empty
   const frontRow = 1;
   const hasFrontRow = enemies.some((e) => e.row === frontRow);
-  console.log(
-    "[LOG] advanceFormationIfNeeded - front row empty:",
-    !hasFrontRow
-  );
-
   if (!hasFrontRow) {
-    console.log("[LOG] Advancing formation - moving all rows forward");
-    for (const e of enemies) {
-      e.row = Math.max(1, e.row - 1);
-    }
-    console.log("After advancement", enemies);
+    for (const e of enemies) e.row = Math.max(1, e.row - 1);
     return true;
   }
   return false;
 }
 
-/* ────────────── HUD ────────────── */
+/* ---------- HUD ---------- */
 function updateHud() {
   if (!cfg) return;
   const hpEl = document.getElementById("hp");
@@ -320,7 +281,7 @@ function updateHud() {
   if (we) we.textContent = `Оружие: ${selectedWeaponId}`;
 }
 
-/* ────────────── Рисование врага (badge) ────────────── */
+/* ---------- DRAW HELPERS ---------- */
 function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   const isBoss = e.kind === "boss";
   const hpSize = isBoss ? 36 : 16;
@@ -345,20 +306,18 @@ function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   s.text(String(e.atk), e.x, e.y + atkDy + offset);
 }
 
-/* ────────────── Логика ударов (compute/perform) ────────────── */
+/* ---------- COMBAT: hit calculations (no logic change) ---------- */
 function rollByLuck(minVal: number, maxVal: number, luck: number): number {
   const L = Math.max(0, Math.min(1, luck / 100));
   const exp = Math.max(0.3, 1 - 0.7 * L);
   const u = Math.random() ** exp;
   return Math.round(minVal + (maxVal - minVal) * u);
 }
-
 function getCritFromLuck(luck: number) {
   const pct = Math.floor(luck / 10);
   const did = Math.random() * 100 < pct;
   return { critPct: pct, didCrit: did, critMul: did ? 2 : 1 };
 }
-
 function getMissForWeapon(weapon: WeaponCfg, pos1to4: number, luck: number) {
   const base =
     weapon.miss?.baseByPos?.[Math.max(1, Math.min(4, pos1to4)) - 1] ?? 0;
@@ -369,7 +328,6 @@ function getMissForWeapon(weapon: WeaponCfg, pos1to4: number, luck: number) {
   const didMiss = Math.random() * 100 < missPct;
   return { missPct, didMiss };
 }
-
 function getElemCoef(
   matrix: ElementMatrixCfg | undefined,
   atk: ElementKey,
@@ -378,7 +336,6 @@ function getElemCoef(
   const M = matrix ?? defaultElementMatrix;
   return M[atk]?.[def] ?? 1.0;
 }
-
 function abilityPctFor(player: PlayerCfg, el: ElementKey) {
   if (el === "none") return 1;
   let v = player.elements?.[el] ?? 1;
@@ -406,8 +363,6 @@ function computeSingleHit(
   const coef = baseCoef * coefMul;
 
   const posIdx = Math.max(1, Math.min(4, Number(target.row ?? 1)));
-
-  // compute miss ONCE (was called twice before)
   const { missPct, didMiss } = getMissForWeapon(weapon, posIdx, luck);
 
   const baseRoll = rollByLuck(pureMin, pureMax, luck);
@@ -415,103 +370,71 @@ function computeSingleHit(
   const rolledVsElem = Math.round(baseRoll * coef * critMul);
   const finalDamage = didMiss ? 0 : rolledVsElem;
 
-  console.log(
-    [
-      `HIT → tgt#${target.id} ${target.kind} el=${target.element} row=${target.row}`,
-      `selEl=${element} (${(pct * 100).toFixed(0)}%)`,
-      `pure=${pureMin}-${pureMax}`,
-      `coef=×${coef.toFixed(3)} (base=×${baseCoef.toFixed(
-        3
-      )}, mul=×${coefMul.toFixed(3)})`,
-      `roll=${baseRoll} ${didCrit ? "CRIT×2" : ""}`,
-      `miss=${missPct.toFixed(1)}% → final=${finalDamage} ${
-        didMiss ? "(MISS)" : "(HIT)"
-      }`,
-    ].join(" | ")
-  );
+  if (DEBUG) {
+    console.log(
+      [
+        `HIT → tgt#${target.id} ${target.kind} el=${target.element} row=${target.row}`,
+        `selEl=${element} (${(pct * 100).toFixed(0)}%)`,
+        `pure=${pureMin}-${pureMax}`,
+        `coef=×${coef.toFixed(3)} (base=×${baseCoef.toFixed(
+          3
+        )}, mul=×${coefMul.toFixed(3)})`,
+        `roll=${baseRoll} ${didCrit ? "CRIT×2" : ""}`,
+        `miss=${missPct.toFixed(1)}% → final=${finalDamage} ${
+          didMiss ? "(MISS)" : "(HIT)"
+        }`,
+      ].join(" | ")
+    );
+  }
 
   return { finalDamage, didMiss, didCrit, critMul, baseRoll, missPct };
 }
 
+/* ---------- apply damage (single place) ---------- */
 function applyDamage(target: Enemy, dmg: number) {
   target.hp = Math.max(0, target.hp - dmg);
 }
-/**
- * Запустить death-анимации для списка мёртвых врагов и, когда все завершатся,
- * удалить их из глобального enemies[] и выполнить единый shift/пересчёт позиций.
- */
+
+/* ---------- orchestrateAtomicDeaths (kept behavior) ---------- */
+/* We reuse your existing implementation (no change except removing noisy logs). */
 function orchestrateAtomicDeaths(deadList: Enemy[]) {
   if (!cfg) return;
   if (!deadList || deadList.length === 0) return;
-
-  console.log(
-    "[LOG] orchestrateAtomicDeaths called, deadList=",
-    deadList.map((d) => d.id)
-  );
-  console.log("Rows before death", enemies);
-
   const uniq = Array.from(
     new Map(deadList.map((d) => [d.id, d])).values()
   ) as Enemy[];
   const total = uniq.length;
   let finished = 0;
   const deadIds = uniq.map((d) => d.id as number);
-
-  const shiftMs = 360;
+  const shiftMs = cfg?.rules?.shiftMs ?? 360;
 
   const onOneDone = (dead: Enemy) => {
     finished++;
-    console.log(
-      "[LOG] onOneDone for",
-      dead.id,
-      "finished:",
-      finished,
-      "total:",
-      total
-    );
-
     if (finished >= total) {
-      console.log("[LOG] All deaths finished, removing enemies");
-
       // Remove dead enemies
       for (const id of deadIds) {
         const idx = enemies.findIndex((e) => e.id === id);
-        if (idx >= 0) {
-          console.log("[LOG] Removing enemy", id);
-          enemies.splice(idx, 1);
-        }
+        if (idx >= 0) enemies.splice(idx, 1);
       }
-
-      console.log("Rows after removal", enemies);
-
-      // Advance formation if front row is empty
-      const advanced = advanceFormationIfNeeded();
-      console.log("[LOG] Formation advanced:", advanced);
-
-      // Recalculate layout
-      console.log("[LOG] Calling layoutEnemies");
+      // Advance formation and animate shift
+      advanceFormationIfNeeded();
       const newTargets = layoutEnemies();
-
-      // Animate shift
-      console.log("[LOG] Calling animateShiftToPositions");
       animateShiftToPositions(newTargets, shiftMs);
-
       updateHud();
-      console.log("Final rows", enemies);
     }
   };
 
   for (const e of uniq) {
-    console.log("[LOG] Starting death for", e.id);
     try {
       startEnemyDeath(cfg!, e, onOneDone);
     } catch (err) {
-      console.error("startEnemyDeath failed for", e, err);
+      if (DEBUG) console.error("startEnemyDeath failed for", e, err);
       onOneDone(e);
     }
   }
 }
 
+/* ---------- performHit (consolidated) ---------- */
 function performHit(
   player: PlayerCfg,
   weapon: WeaponCfg,
@@ -525,26 +448,19 @@ function performHit(
     cycleOrder?: ElementKey[];
   } = {}
 ) {
-  if (target.hp <= 0) {
-    console.log(`Цель #${target.id} уже мертва`);
-    return { type: "skip", reason: "target_dead" };
-  }
-
+  if (target.hp <= 0) return { type: "skip", reason: "target_dead" };
   const M: ElementMatrixCfg =
     elementMatrix ??
     (cfg?.elementMatrix as ElementMatrixCfg) ??
     defaultElementMatrix;
-
-  // We'll collect killed enemies here and run atomic deletion after animations are done
   const deadList: Enemy[] = [];
 
   if (ability === "ab8") {
     const ORDER = opts.cycleOrder ?? ["earth", "fire", "water", "cosmos"];
     const fromEl = target.element;
     let toEl: ElementKey;
-    if (opts.element && opts.element !== "none") {
-      toEl = opts.element;
-    } else {
+    if (opts.element && opts.element !== "none") toEl = opts.element;
+    else {
       const idx = ORDER.indexOf(fromEl);
       const nextIdx = (idx >= 0 ? idx + 1 : 0) % ORDER.length;
       toEl = ORDER[nextIdx] as ElementKey;
@@ -552,19 +468,39 @@ function performHit(
     target.element = toEl;
     const cost = opts.ab8Cost ?? 2;
     hitsLeft = Math.max(0, hitsLeft - cost);
-    console.log(
-      `AB8: #${target.id} ${fromEl}→${toEl} | урон=0 | ходы=-${cost}`
-    );
     updateHud();
     return { type: "ab8", from: fromEl, to: toEl, cost };
   }
 
-  // ab5 / ab6 / ab7 (multi-target): unify hits array
+  // helper for single-target hits (point/ab0)
+  const singleTargetHit = (el: ElementKey) => {
+    const r = computeSingleHit(player, weapon, target, M, el);
+    applyDamage(target, r.finalDamage);
+    hitsLeft = Math.max(0, hitsLeft - 1);
+    if (target.hp <= 0) deadList.push(target);
+    updateHud();
+    return { id: target.id, damage: r.finalDamage, didMiss: !!r.didMiss };
+  };
+
+  if (ability === "point") {
+    const pointEl = opts.element ?? "none";
+    const hitInfo = singleTargetHit(pointEl);
+    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
+    return { type: "point", total: hitInfo.damage, hits: [hitInfo] };
+  }
+
+  if (ability === "ab0") {
+    const hitInfo = singleTargetHit("none");
+    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
+    return { type: "ab0", total: hitInfo.damage, hits: [hitInfo] };
+  }
+
+  // ab5/6/7 multi-target
   if (ability === "ab5" || ability === "ab6" || ability === "ab7") {
     const superEl: ElementKey =
       ability === "ab5" ? "fire" : ability === "ab6" ? "earth" : "water";
     const hitsArr: { id: number; damage: number; didMiss: boolean }[] = [];
-
+    // first target
     const r1 = computeSingleHit(player, weapon, target, M, superEl);
     applyDamage(target, r1.finalDamage);
     hitsArr.push({
@@ -574,6 +510,7 @@ function performHit(
     });
     if (target.hp <= 0) deadList.push(target);
 
+    // determine second target
     let second: Enemy | null = null;
     if (ability === "ab5") {
       const cand = enemies.filter((e) => e.id !== target.id && e.hp > 0);
@@ -590,15 +527,14 @@ function performHit(
       same.sort((a, b) => Math.abs(a.x - target.x) - Math.abs(b.x - target.x));
       second = same[0] ?? null;
     } else {
-      const forward = enemies
-        .filter(
-          (e) =>
-            e.id !== target.id &&
-            e.hp > 0 &&
-            e.row === target.row &&
-            e.x > target.x
-        )
-        .sort((a, b) => a.x - target.x - (b.x - target.x));
+      const forward = enemies.filter(
+        (e) =>
+          e.id !== target.id &&
+          e.hp > 0 &&
+          e.row === target.row &&
+          e.x > target.x
+      );
+      forward.sort((a, b) => a.x - target.x - (b.x - target.x));
       second = forward[0] ?? null;
     }
 
@@ -618,57 +554,14 @@ function performHit(
     const total = hitsArr.reduce((s, x) => s + x.damage, 0);
     updateHud();
 
-    // запуск атомарной обработки смертей (если есть)
-    if (deadList.length > 0) {
-      orchestrateAtomicDeaths(deadList);
-    }
-
-    console.log("performHit result:", {
-      type: ability,
-      total,
-      count: hitsArr.length,
-      hits: hitsArr,
-    });
+    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
     return { type: ability, total, count: hitsArr.length, hits: hitsArr };
   }
 
-  // point (single-target) unified
-  if (ability === "point") {
-    const el = opts.element ?? "none";
-    const r = computeSingleHit(player, weapon, target, M, el);
-    applyDamage(target, r.finalDamage);
-    hitsLeft = Math.max(0, hitsLeft - 1);
-    console.log(`POINT ${el}: dmg=${r.finalDamage} | ходы=-1`);
-    updateHud();
-
-    const hitsArr = [
-      { id: target.id, damage: r.finalDamage, didMiss: !!r.didMiss },
-    ];
-    const total = hitsArr.reduce((s, x) => s + x.damage, 0);
-    if (target.hp <= 0) deadList.push(target);
-    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
-
-    return { type: "point", total, hits: hitsArr };
-  } else {
-    // ab0
-    const r = computeSingleHit(player, weapon, target, M, "none");
-    applyDamage(target, r.finalDamage);
-    hitsLeft = Math.max(0, hitsLeft - 1);
-    console.log(`AB0: dmg=${r.finalDamage} | ходы=-1`);
-    updateHud();
-
-    const hitsArr = [
-      { id: target.id, damage: r.finalDamage, didMiss: !!r.didMiss },
-    ];
-    const total = hitsArr.reduce((s, x) => s + x.damage, 0);
-    if (target.hp <= 0) deadList.push(target);
-    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
-
-    return { type: "ab0", total, hits: hitsArr };
-  }
+  return { type: "skip", reason: "unknown_ability" };
 }
 
-/* ────────────── p5-сцена ────────────── */
+/* ---------- P5 scene ---------- */
 const selectedIcons: Record<number, p5.Image> = {};
 
 const sketch = (s: p5) => {
@@ -751,7 +644,6 @@ const sketch = (s: p5) => {
 
     let barY = fieldH;
     const weaponY = barY;
-    //drawLogPanel(s, cfg);
     drawPanelBg(s, fieldX, barY, fieldW, 750, cfg.field?.bg);
     drawHpStatus(s, fieldX, barY, fieldW, {
       hp: cfg.player.hp,
@@ -760,7 +652,7 @@ const sketch = (s: p5) => {
     setHpBarY(barY);
     drawHpImpactOverlay(s);
 
-    barY = barY + 60;
+    barY += 60;
 
     drawWeaponPanel(
       s,
@@ -865,15 +757,12 @@ const sketch = (s: p5) => {
 
     if (superId && superId !== "ab0") {
       abilityType = superId as "ab5" | "ab6" | "ab7" | "ab8";
-      if (abilityType === "ab8" && pointEl !== "none") {
+      if (abilityType === "ab8" && pointEl !== "none")
         options.element = pointEl;
-      }
     } else if (pointEl !== "none") {
       abilityType = "point";
       options.element = pointEl;
-    } else {
-      abilityType = "ab0";
-    }
+    } else abilityType = "ab0";
 
     const result = performHit(
       cfg.player,
@@ -891,34 +780,27 @@ const sketch = (s: p5) => {
       result.type !== "skip"
     ) {
       const totalDamage = (result as any).total ?? 0;
-      // hits — массив с деталями по каждой цели (если есть)
       const hitsArray = (result as any).hits ?? [
         { id: enemy.id, damage: (result as any).damage ?? totalDamage },
       ];
-
       const ctx = { reason: "counter", totalDamage, hits: hitsArray };
       const rule = (weapon.retaliationRule as "t1" | "t2" | "t3") ?? "t1";
-
       queueEnemyRetaliationToHp(cfg, enemy, enemies, ctx, rule);
     }
 
-    console.log("Результат удара:", result);
+    if (DEBUG) console.log("Результат удара:", result);
     updateHud();
   };
 };
 
-/**
- * Плавно сдвигаем элементы enemies к целевым позициям targetPos (array of {id,x,y}).
- * duration в ms.
- */
+/* ---------- shift animation (unchanged) ---------- */
 function animateShiftToPositions(
   targetPos: { id: number; x: number; y: number }[],
   duration = 360
 ) {
   const startPositions = new Map<number, { x: number; y: number }>();
-  for (const e of enemies) {
+  for (const e of enemies)
     startPositions.set(e.id as number, { x: e.x, y: e.y });
-  }
   const start = nowMs();
 
   function tick() {
@@ -939,12 +821,12 @@ function animateShiftToPositions(
 
   requestAnimationFrame(tick);
 }
-/* ────────────── Утилиты: селекты и иконка оружия ────────────── */
+
+/* ---------- small utils ---------- */
 function getSelectedWeaponCfg(): WeaponCfg | null {
   if (!cfg?.weapons) return null;
   return cfg.weapons.find((w) => w.id === selectedWeaponId) ?? null;
 }
-
 function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
   if (!cfg?.weapons || !cfg.weapons.length) return;
   const weapon =
@@ -953,7 +835,6 @@ function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
   const dy = Math.sin(p.frameCount / 10) * 1.5;
   const img = (selectedIcons as any)[weapon.id] as p5.Image | undefined;
   if (img) p.image(img, x + 260, y - 40 + dy, 64, 120);
-
   const selectedEl = getActiveElementFromPointAbility();
   const dbg = DebugStatsPlayerDamage(cfg!.player, selectedEl);
   p.fill(0);
@@ -962,7 +843,7 @@ function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
   p.text(`${dbg.min} – ${dbg.max}`, x + 270, y + size / 2 - 8 + 55);
 }
 
-/* ────────────── Отладка: min/max по стихии ────────────── */
+/* ---------- debug helper ---------- */
 let lastPlayerDebugLine = "";
 const ELEMENTS_4: ElementKey[] = ["earth", "fire", "water", "cosmos"];
 function DebugStatsPlayerDamage(
@@ -972,8 +853,6 @@ function DebugStatsPlayerDamage(
   const atkMin = player.attack.min;
   const atkMax = player.attack.max;
   const luck = player.luck ?? 0;
-  const critChancePct = luck / 10;
-
   const abilityPctSel = player.elements?.[selectedElement] ?? 1;
   const pureMinSel = Math.floor(atkMin * abilityPctSel);
   const pureMaxSel = Math.floor(atkMax * abilityPctSel);
@@ -986,21 +865,19 @@ function DebugStatsPlayerDamage(
     parts.push(`${el}=${dmin}-${dmax}`);
   }
 
-  const line = `PLAYER base=${atkMin}-${atkMax} | luck=${luck} (crit=${critChancePct.toFixed(
-    1
-  )}%) | + selected=${selectedElement}(${(abilityPctSel * 100).toFixed(
-    0
+  const line = `PLAYER base=${atkMin}-${atkMax} | luck=${luck} | + selected=${selectedElement}(${Math.round(
+    abilityPctSel * 100
   )}%) | + pure=${pureMinSel}-${pureMaxSel} | ALL[ ${parts.join(" | ")} ]`;
 
   if (line !== lastPlayerDebugLine) {
-    console.log(line);
+    if (DEBUG) console.log(line);
     lastPlayerDebugLine = line;
   }
 
   return { min: pureMinSel, max: pureMaxSel };
 }
 
-/* ────────────── Запуск ────────────── */
+/* ---------- start ---------- */
 (async () => {
   await loadConfig();
   new p5(sketch);
