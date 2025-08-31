@@ -418,7 +418,7 @@ export function startEnemyDeath(
     const t = nowMs();
     const k = Math.min(1, (t - start) / deathMs);
 
-    console.log("[LOG] Death animation progress for", enemy.id, ":", k);
+    //console.log("[LOG] Death animation progress for", enemy.id, ":", k);
 
     (enemy as any).__deadScale = 1 - easeInOutQuad(k);
     (enemy as any).__deadAlpha = 1 - k;

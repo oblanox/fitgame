@@ -1,5 +1,4 @@
-﻿// src/main.ts (refactored)
-// основной UI/логика — оптимизированная и менее шумная версия
+﻿// src/main.ts
 import p5 from "p5";
 import { drawHpStatus } from "./ui/hp_status";
 import {
@@ -33,10 +32,22 @@ import {
   drawHpImpactOverlay,
   getEnemyYOffset,
   queueEnemyRetaliationToHp,
-  startEnemyDeath,
-  nowMs,
-  easeInOutQuad,
 } from "./animations";
+
+import {
+  computeSingleHit,
+  applyDamage,
+  DEFAULT_ELEMENT_MATRIX,
+} from "./combat";
+import {
+  layoutEnemies as layoutEnemiesModule,
+  animateShiftToPositions as animateShiftToPositionsModule,
+  advanceFormationIfNeeded as advanceFormationIfNeededModule,
+  getFieldRect,
+  getRowYs,
+} from "./layout";
+
+import { orchestrateAtomicDeaths } from "./death";
 import {
   Cfg,
   Enemy,
@@ -47,7 +58,7 @@ import {
 } from "./types";
 
 /* ---------- CONFIG / FLAGS ---------- */
-const DEBUG = false;
+const DEBUG = true;
 
 /* ---------- HELPERS & CONSTANTS ---------- */
 const ELEMENT_COLOR: Record<ElementKey, string> = {
@@ -82,13 +93,7 @@ let playerHp = 0;
 let enemies: Enemy[] = [];
 
 /* ---------- DEFAULTS ---------- */
-const defaultElementMatrix: ElementMatrixCfg = {
-  earth: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
-  fire: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
-  water: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
-  cosmos: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
-  none: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
-};
+const defaultElementMatrix: ElementMatrixCfg = DEFAULT_ELEMENT_MATRIX;
 
 /* ---------- CONFIG LOAD / RESET ---------- */
 async function loadConfig(url = "/config.json") {
@@ -97,7 +102,6 @@ async function loadConfig(url = "/config.json") {
     cfg = (await r.json()) as Cfg;
   } catch (e) {
     console.error("config load failed, using fallback", e);
-    // minimal fallback (keeps the structure expected elsewhere)
     cfg = {
       field: {
         bg: "#F9EDD6",
@@ -187,86 +191,10 @@ function resetSession() {
     lineOffset: cfg.boss.lineOffset ?? 0,
   });
 
-  layoutEnemies(); // positions initial
+  // let layout module know about our enemies
+  (cfg as any).__enemies = enemies;
+  layoutEnemiesModule(cfg, enemies);
   updateHud();
-}
-
-/* ---------- GEOMETRY & LAYOUT ---------- */
-function getFieldRect() {
-  // kept constants from original; you can adapt to canvas size later
-  const W = 960,
-    H = 540;
-  const f = cfg!.field!;
-  const fieldW = Math.floor(W * clamp(f.widthRatio ?? 0.35, 0, 1));
-  const fieldH = H - (f.padding?.top ?? 40) - (f.padding?.bottom ?? 120);
-  const anchor = (f.anchor as string) ?? "center";
-  const padLeft = Number(f.padding?.left ?? 0);
-  const padRight = Number(f.padding?.right ?? 0);
-
-  let fieldX = 0;
-  if (anchor === "left") fieldX = padLeft;
-  else if (anchor === "right") fieldX = Math.max(0, W - fieldW - padRight);
-  else fieldX = Math.floor((W - fieldW) / 2);
-
-  const fieldY = f.padding?.top ?? 40;
-  return { fieldX, fieldY, fieldW, fieldH };
-}
-
-function getRowYs(
-  rows: number,
-  rect: { fieldX: number; fieldY: number; fieldW: number; fieldH: number },
-  field: any
-) {
-  const insetTop = field.lineInsetTop ?? 14;
-  const insetBottom = field.lineInsetBottom ?? 14;
-  const usableH = rect.fieldH - insetTop - insetBottom;
-  const rowsCount = Math.max(2, rows);
-  const stepAuto = usableH / (rowsCount - 1);
-  const step = field.lineStep ? Math.min(field.lineStep, stepAuto) : stepAuto;
-  const y0 = rect.fieldY + rect.fieldH - insetBottom;
-  return Array.from({ length: rowsCount }, (_, i) => y0 - i * step);
-}
-
-/**
- * layoutEnemies:
- * - если передан список listEnemies — вычисляет и возвращает целевые позиции для него (и применяет позиции)
- * - если без аргумента — применяет к глобальному enemies
- */
-function layoutEnemies(listEnemies?: Enemy[]) {
-  if (!cfg) return [];
-  const arr = listEnemies ?? enemies;
-  const rect = getFieldRect();
-  const rows = Math.max(2, cfg.field!.rows ?? 5);
-  const rowYs = getRowYs(rows, rect, cfg.field!);
-  const xAt = (col: number) => rect.fieldX + clamp(col, 0, 1) * rect.fieldW;
-
-  const targets: { id: number; x: number; y: number }[] = [];
-
-  for (const e of arr) {
-    const rowIdx = clamp(e.row, 1, rows) - 1;
-    const baseY = rowYs[rowIdx] + (e.lineOffset ?? 0);
-    const minY = rect.fieldY + e.r;
-    const maxY = rect.fieldY + rect.fieldH - e.r;
-    const tx = xAt(e.col);
-    const ty = clamp(baseY, minY, maxY);
-
-    e.x = tx;
-    e.y = ty;
-    targets.push({ id: e.id as number, x: tx, y: ty });
-
-    if (DEBUG) console.log("[layout] enemy", e.id, "->", tx, ty);
-  }
-  return targets;
-}
-
-function advanceFormationIfNeeded() {
-  const frontRow = 1;
-  const hasFrontRow = enemies.some((e) => e.row === frontRow);
-  if (!hasFrontRow) {
-    for (const e of enemies) e.row = Math.max(1, e.row - 1);
-    return true;
-  }
-  return false;
 }
 
 /* ---------- HUD ---------- */
@@ -306,133 +234,10 @@ function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   s.text(String(e.atk), e.x, e.y + atkDy + offset);
 }
 
-/* ---------- COMBAT: hit calculations (no logic change) ---------- */
-function rollByLuck(minVal: number, maxVal: number, luck: number): number {
-  const L = Math.max(0, Math.min(1, luck / 100));
-  const exp = Math.max(0.3, 1 - 0.7 * L);
-  const u = Math.random() ** exp;
-  return Math.round(minVal + (maxVal - minVal) * u);
-}
-function getCritFromLuck(luck: number) {
-  const pct = Math.floor(luck / 10);
-  const did = Math.random() * 100 < pct;
-  return { critPct: pct, didCrit: did, critMul: did ? 2 : 1 };
-}
-function getMissForWeapon(weapon: WeaponCfg, pos1to4: number, luck: number) {
-  const base =
-    weapon.miss?.baseByPos?.[Math.max(1, Math.min(4, pos1to4)) - 1] ?? 0;
-  const step = weapon.miss?.luckStep ?? 10;
-  const per = weapon.miss?.luckPerStepPct ?? 1;
-  const steps = Math.floor(luck / step);
-  const missPct = Math.max(0, Math.min(100, base - steps * per));
-  const didMiss = Math.random() * 100 < missPct;
-  return { missPct, didMiss };
-}
-function getElemCoef(
-  matrix: ElementMatrixCfg | undefined,
-  atk: ElementKey,
-  def: ElementKey
-) {
-  const M = matrix ?? defaultElementMatrix;
-  return M[atk]?.[def] ?? 1.0;
-}
-function abilityPctFor(player: PlayerCfg, el: ElementKey) {
-  if (el === "none") return 1;
-  let v = player.elements?.[el] ?? 1;
-  if (v > 1.001) v /= 100;
-  return v;
-}
+/* ---------- COMBAT: hit calculations (delegated to combat.ts) ---------- */
+/* computeSingleHit / applyDamage are imported from ./combat */
 
-function computeSingleHit(
-  player: PlayerCfg,
-  weapon: WeaponCfg,
-  target: Enemy,
-  matrix: ElementMatrixCfg | undefined,
-  element: ElementKey,
-  coefMul = 1.0,
-  skipMatrix = false
-) {
-  const luck = player.luck ?? 0;
-  const pct = abilityPctFor(player, element);
-  const pureMin = Math.floor(player.attack.min * pct);
-  const pureMax = Math.floor(player.attack.max * pct);
-
-  const baseCoef = skipMatrix
-    ? 1.0
-    : getElemCoef(matrix ?? defaultElementMatrix, element, target.element);
-  const coef = baseCoef * coefMul;
-
-  const posIdx = Math.max(1, Math.min(4, Number(target.row ?? 1)));
-  const { missPct, didMiss } = getMissForWeapon(weapon, posIdx, luck);
-
-  const baseRoll = rollByLuck(pureMin, pureMax, luck);
-  const { didCrit, critMul } = getCritFromLuck(luck);
-  const rolledVsElem = Math.round(baseRoll * coef * critMul);
-  const finalDamage = didMiss ? 0 : rolledVsElem;
-
-  if (DEBUG) {
-    console.log(
-      [
-        `HIT → tgt#${target.id} ${target.kind} el=${target.element} row=${target.row}`,
-        `selEl=${element} (${(pct * 100).toFixed(0)}%)`,
-        `pure=${pureMin}-${pureMax}`,
-        `coef=×${coef.toFixed(3)} (base=×${baseCoef.toFixed(
-          3
-        )}, mul=×${coefMul.toFixed(3)})`,
-        `roll=${baseRoll} ${didCrit ? "CRIT×2" : ""}`,
-        `miss=${missPct.toFixed(1)}% → final=${finalDamage} ${
-          didMiss ? "(MISS)" : "(HIT)"
-        }`,
-      ].join(" | ")
-    );
-  }
-
-  return { finalDamage, didMiss, didCrit, critMul, baseRoll, missPct };
-}
-
-/* ---------- apply damage (single place) ---------- */
-function applyDamage(target: Enemy, dmg: number) {
-  target.hp = Math.max(0, target.hp - dmg);
-}
-
-/* ---------- orchestrateAtomicDeaths (kept behavior) ---------- */
-/* We reuse your existing implementation (no change except removing noisy logs). */
-function orchestrateAtomicDeaths(deadList: Enemy[]) {
-  if (!cfg) return;
-  if (!deadList || deadList.length === 0) return;
-  const uniq = Array.from(
-    new Map(deadList.map((d) => [d.id, d])).values()
-  ) as Enemy[];
-  const total = uniq.length;
-  let finished = 0;
-  const deadIds = uniq.map((d) => d.id as number);
-  const shiftMs = cfg?.rules?.shiftMs ?? 360;
-
-  const onOneDone = (dead: Enemy) => {
-    finished++;
-    if (finished >= total) {
-      // Remove dead enemies
-      for (const id of deadIds) {
-        const idx = enemies.findIndex((e) => e.id === id);
-        if (idx >= 0) enemies.splice(idx, 1);
-      }
-      // Advance formation and animate shift
-      advanceFormationIfNeeded();
-      const newTargets = layoutEnemies();
-      animateShiftToPositions(newTargets, shiftMs);
-      updateHud();
-    }
-  };
-
-  for (const e of uniq) {
-    try {
-      startEnemyDeath(cfg!, e, onOneDone);
-    } catch (err) {
-      if (DEBUG) console.error("startEnemyDeath failed for", e, err);
-      onOneDone(e);
-    }
-  }
-}
+/* ---------- orchestrateAtomicDeaths — imported from ./death.ts (Promise API) ---------- */
 
 /* ---------- performHit (consolidated) ---------- */
 function performHit(
@@ -485,13 +290,17 @@ function performHit(
   if (ability === "point") {
     const pointEl = opts.element ?? "none";
     const hitInfo = singleTargetHit(pointEl);
-    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
+    if (deadList.length > 0) {
+      orchestrateAtomicDeaths(cfg!, enemies, deadList).then(() => updateHud());
+    }
     return { type: "point", total: hitInfo.damage, hits: [hitInfo] };
   }
 
   if (ability === "ab0") {
     const hitInfo = singleTargetHit("none");
-    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
+    if (deadList.length > 0) {
+      orchestrateAtomicDeaths(cfg!, enemies, deadList).then(() => updateHud());
+    }
     return { type: "ab0", total: hitInfo.damage, hits: [hitInfo] };
   }
 
@@ -554,7 +363,9 @@ function performHit(
     const total = hitsArr.reduce((s, x) => s + x.damage, 0);
     updateHud();
 
-    if (deadList.length > 0) orchestrateAtomicDeaths(deadList);
+    if (deadList.length > 0) {
+      orchestrateAtomicDeaths(cfg!, enemies, deadList).then(() => updateHud());
+    }
     return { type: ability, total, count: hitsArr.length, hits: hitsArr };
   }
 
@@ -594,7 +405,7 @@ const sketch = (s: p5) => {
       return;
     }
 
-    const { fieldX, fieldY, fieldW, fieldH } = getFieldRect();
+    const { fieldX, fieldY, fieldW, fieldH } = getFieldRect(cfg);
     const rows = Math.max(2, cfg.field!.rows ?? 5);
     const rowYs = getRowYs(
       rows,
@@ -792,35 +603,6 @@ const sketch = (s: p5) => {
     updateHud();
   };
 };
-
-/* ---------- shift animation (unchanged) ---------- */
-function animateShiftToPositions(
-  targetPos: { id: number; x: number; y: number }[],
-  duration = 360
-) {
-  const startPositions = new Map<number, { x: number; y: number }>();
-  for (const e of enemies)
-    startPositions.set(e.id as number, { x: e.x, y: e.y });
-  const start = nowMs();
-
-  function tick() {
-    const t = nowMs();
-    const k = Math.min(1, (t - start) / duration);
-    const ease = easeInOutQuad(k);
-
-    for (const tp of targetPos) {
-      const e = enemies.find((x) => x.id === tp.id);
-      if (!e) continue;
-      const startP = startPositions.get(tp.id) ?? { x: e.x, y: e.y };
-      e.x = lerp(startP.x, tp.x, ease);
-      e.y = lerp(startP.y, tp.y, ease);
-    }
-
-    if (k < 1) requestAnimationFrame(tick);
-  }
-
-  requestAnimationFrame(tick);
-}
 
 /* ---------- small utils ---------- */
 function getSelectedWeaponCfg(): WeaponCfg | null {
