@@ -114,3 +114,13 @@ export type Enemy = {
   // возможны доп. поля (yOffset, __outlineKick) — добавляем как индексируемые:
   [k: string]: any;
 };
+
+export type TagsMap = Record<string, any>;
+
+// safe accessor: создаёт __tags при первой записи
+export function getTags(enemy: Enemy): TagsMap {
+  if (!enemy.__tags || typeof enemy.__tags !== "object") {
+    enemy.__tags = {};
+  }
+  return enemy.__tags as TagsMap;
+}

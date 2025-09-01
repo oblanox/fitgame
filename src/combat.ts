@@ -1,5 +1,31 @@
 // src/combat.ts
-import { ElementKey, ElementMatrixCfg, PlayerCfg, WeaponCfg, Enemy } from "./types";
+import {
+  ElementKey,
+  ElementMatrixCfg,
+  PlayerCfg,
+  WeaponCfg,
+  Enemy,
+  getTags,
+  TagsMap
+  
+} from "./types";
+
+
+
+let _isPlayerLock = false;
+
+export function setPlayerLock(v: boolean) {
+  _isPlayerLock = v;
+}
+
+export function getIsPlayerLock(): boolean {
+  return _isPlayerLock;
+}
+
+
+
+
+// ----------------- конец Turn flags -----------------
 
 export const DEFAULT_ELEMENT_MATRIX: ElementMatrixCfg = {
   earth: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
@@ -9,7 +35,11 @@ export const DEFAULT_ELEMENT_MATRIX: ElementMatrixCfg = {
   none: { earth: 1, fire: 1, water: 1, cosmos: 1, none: 1 },
 };
 
-export function rollByLuck(minVal: number, maxVal: number, luck: number): number {
+export function rollByLuck(
+  minVal: number,
+  maxVal: number,
+  luck: number
+): number {
   const L = Math.max(0, Math.min(1, luck / 100));
   const exp = Math.max(0.3, 1 - 0.7 * L);
   const u = Math.random() ** exp;
@@ -22,7 +52,11 @@ export function getCritFromLuck(luck: number) {
   return { critPct: pct, didCrit: did, critMul: did ? 2 : 1 };
 }
 
-export function getMissForWeapon(weapon: WeaponCfg, pos1to4: number, luck: number) {
+export function getMissForWeapon(
+  weapon: WeaponCfg,
+  pos1to4: number,
+  luck: number
+) {
   const base =
     weapon.miss?.baseByPos?.[Math.max(1, Math.min(4, pos1to4)) - 1] ?? 0;
   const step = weapon.miss?.luckStep ?? 10;
@@ -79,7 +113,96 @@ export function computeSingleHit(
   return { finalDamage, didMiss, didCrit, critMul, baseRoll, missPct };
 }
 
-/** applyDamage — только уменьшение HP (без побочных эффектов) */
-export function applyDamage(target: Enemy, dmg: number) {
-  target.hp = Math.max(0, target.hp - dmg);
+// src/combat.ts
+// --- идемпотентная реализация applyDamage ---
+/**
+ * Применяет урон к цели. Идемпотентна: если цель уже мертва (hp <= 0), не меняет её.
+ * Возвращает объект с информацией о предыдущем и новом HP и флагом died.
+ */
+export function applyDamage(
+  target: Enemy,
+  dmg: number
+): { died: boolean; prevHp: number; nowHp: number } {
+  // защитная нормализация
+  const prev = typeof target.hp === "number" ? target.hp : 0;
+  if (prev <= 0) {
+    // уже мёртв — ничего не делаем
+    return { died: false, prevHp: prev, nowHp: prev };
+  }
+
+  // нормализуем dmg
+  const damage = Number.isFinite(dmg) ? Math.max(0, Math.floor(dmg)) : 0;
+
+  // применяем урон (не допускаем отрицательного HP)
+  target.hp = Math.max(0, prev - damage);
+  const died = prev > 0 && target.hp === 0;
+
+  return { died, prevHp: prev, nowHp: target.hp };
+}
+// --- конец applyDamage ---
+
+// установить/увеличить тег (counted)
+export function addTag(enemy: Enemy, tag: string, meta: any = true) {
+  const tags = getTags(enemy);
+  if (typeof tags[tag] === "number") {
+    tags[tag] = (tags[tag] as number) + 1;
+  } else if (tags[tag]) {
+    // если уже установлено не числом — сохраняем в объект {count: n, meta}
+    tags[tag] = { count: 2, meta };
+  } else {
+    // по умолчанию ставим счётчик 1 (число) и дополнительную мета-информацию в tags[`${tag}_meta`]
+    tags[tag] = 1;
+    if (meta !== true) tags[`${tag}_meta`] = meta;
+  }
+}
+
+// снять/декрементировать тег; если дошли до нуля — удалить
+export function removeTag(enemy: Enemy, tag: string) {
+  const tags = (enemy.__tags as TagsMap) ?? undefined;
+  if (!tags || !tags[tag]) return;
+
+  const v = tags[tag];
+  if (typeof v === "number") {
+    const next = (v as number) - 1;
+    if (next <= 0) {
+      delete tags[tag];
+      delete tags[`${tag}_meta`];
+    } else {
+      tags[tag] = next;
+    }
+  } else if (typeof v === "object" && v !== null && typeof v.count === "number") {
+    v.count -= 1;
+    if (v.count <= 0) {
+      delete tags[tag];
+      delete tags[`${tag}_meta`];
+    } else {
+      tags[tag] = v;
+    }
+  } else {
+    // non-counted value — просто удалим
+    delete tags[tag];
+    delete tags[`${tag}_meta`];
+  }
+  // если __tags пуст, можно удалить объект целиком (чтобы не мусорить)
+  if (Object.keys(tags).length === 0) delete enemy.__tags;
+}
+
+// проверить наличие тега (truthy)
+export function hasTag(enemy: Enemy, tag: string): boolean {
+  const tags = enemy.__tags as TagsMap | undefined;
+  if (!tags) return false;
+  const v = tags[tag];
+  if (!v) return false;
+  if (typeof v === "number") return v > 0;
+  if (typeof v === "object" && typeof v.count === "number") return v.count > 0;
+  return true;
+}
+
+// полное удаление тега
+export function clearTag(enemy: Enemy, tag: string) {
+  const tags = enemy.__tags as TagsMap | undefined;
+  if (!tags) return;
+  delete tags[tag];
+  delete tags[`${tag}_meta`];
+  if (Object.keys(tags).length === 0) delete enemy.__tags;
 }

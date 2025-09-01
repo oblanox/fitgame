@@ -1,4 +1,5 @@
 import { Cfg, Enemy, ElementKey } from "./types";
+import { removeTag } from "./combat";
 
 /* ---------- анимация / эффекты для main.ts ---------- */
 
@@ -90,10 +91,15 @@ export function queueEnemyRetaliationToHp(
     totalDamage?: number;
     hits?: { id: number; damage: number; didMiss?: boolean }[];
   },
-  rule: "t1" | "t2" | "t3" = "t1"
+  rule: "t1" | "t2" | "t3" = "t1",
+  onComplete?: () => void // ← Добавляем callback для завершения
 ) {
   if (!cfg?.player || !target || target.hp <= 0) return;
 
+  // Блокируем взаимодействие игрока
+  if (typeof window !== "undefined") {
+    (window as any).__isPlayerInteractionBlocked = true;
+  }
   const row = Number(target.row ?? 1);
 
   // candidates as before (rule t1/t2/t3 and boss special-case)
@@ -181,20 +187,39 @@ export function queueEnemyRetaliationToHp(
   }
 
   // schedule animations as before
+  // schedule animations as before
   const gap = cfg?.rules?.chainGapMs ?? 120;
-  filtered.forEach((e, i) => {
-    setTimeout(() => startEnemyDiveToHp(cfg, e, ctx), i * gap);
-  });
-}
+  const totalEnemies = filtered.length;
+  let completedEnemies = 0;
 
+  filtered.forEach((e, i) => {
+    setTimeout(() => {
+      startEnemyDiveToHp(cfg, e, ctx, () => {
+        // Callback при завершении атаки одного врага
+        completedEnemies++;
+        if (completedEnemies >= totalEnemies && onComplete) {
+          onComplete();
+        }
+      });
+    }, i * gap);
+  });
+
+  // Если нет врагов для атаки, сразу вызываем завершение
+  if (filtered.length === 0 && onComplete) {
+    onComplete();
+  }
+}
 /** Начать анимацию удара данного врага в HP-бар игрока */
 function startEnemyDiveToHp(
   cfg: Cfg,
   enemy: Enemy,
-  ctx: { reason: string; totalDamage?: number }
+  ctx: { reason: string; totalDamage?: number },
+  onComplete?: () => void // ← Добавляем callback
 ) {
-  if (enemy.hp <= 0 || animByEnemy.get(enemy)) return;
-
+  if (enemy.hp <= 0 || animByEnemy.get(enemy)) {
+    if (onComplete) onComplete();
+    return;
+  }
   const hasHp = hpBarSet;
   const rules: any = (cfg as any).rules ?? {};
   const downMs = hasHp ? Number(rules.outMs ?? 240) : 140;
@@ -215,17 +240,21 @@ function startEnemyDiveToHp(
     dmgApplied: false,
   };
   animByEnemy.set(enemy, st);
-  requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
+  requestAnimationFrame(() => animTickDive(cfg, enemy, ctx, onComplete)); // ← Передаем callback
 }
 
 /** Внутренний тик анимации (рекурсивный через requestAnimationFrame) */
 function animTickDive(
   cfg: Cfg,
   enemy: Enemy,
-  ctx: { reason: string; totalDamage?: number }
+  ctx: { reason: string; totalDamage?: number },
+  onComplete?: () => void // ← Добавляем callback
 ) {
   const st = animByEnemy.get(enemy);
-  if (!st) return;
+  if (!st) {
+    if (onComplete) onComplete();
+    return;
+  }
 
   const t = nowMs();
 
@@ -287,13 +316,21 @@ function animTickDive(
     setEnemyYOffset(enemy, y - st.startY);
 
     if (k < 1) {
-      requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
+      requestAnimationFrame(() => animTickDive(cfg, enemy, ctx, onComplete));
       return;
     }
 
     setEnemyYOffset(enemy, 0);
     (enemy as any).__outlineKick = 0;
     animByEnemy.delete(enemy);
+    try {
+      // removeTag должен быть доступен в скоупе (импортируй его, если в другом модуле)
+      removeTag(enemy, "attack");
+    } catch (err) {
+      console.error("[animTickDive] removeTag error:", err);
+    }
+    // Вызываем callback при завершении анимации
+    if (onComplete) onComplete();
     return;
   }
 }
