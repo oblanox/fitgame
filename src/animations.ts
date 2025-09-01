@@ -1,5 +1,5 @@
 import { Cfg, Enemy, ElementKey } from "./types";
-import { removeTag } from "./combat";
+import { addTag, hasTag, removeTag } from "./combat";
 
 /* ---------- анимация / эффекты для main.ts ---------- */
 
@@ -92,10 +92,12 @@ export function queueEnemyRetaliationToHp(
     hits?: { id: number; damage: number; didMiss?: boolean }[];
   },
   rule: "t1" | "t2" | "t3" = "t1",
+  abilityType: string,
   onComplete?: () => void // ← Добавляем callback для завершения
 ) {
   if (!cfg?.player || !target || target.hp <= 0) return;
 
+  console.log("тип удара: " + abilityType);
   // Блокируем взаимодействие игрока
   if (typeof window !== "undefined") {
     (window as any).__isPlayerInteractionBlocked = true;
@@ -107,7 +109,11 @@ export function queueEnemyRetaliationToHp(
   // --- build candidates by rule ---
   switch (rule) {
     case "t1":
-      candidates = [target];
+      if (abilityType === "point" || abilityType === "ab0")
+        candidates = all.filter(
+          (e) => e.kind === "minion" && e.type === 1 && e.hp > 0
+        );
+      else candidates = [target];
       break;
     case "t2": {
       // target + nearest alive in same row (if any)
@@ -252,17 +258,20 @@ function animTickDive(
 ) {
   const st = animByEnemy.get(enemy);
   if (!st) {
-    if (onComplete) onComplete();
+    if (onComplete) {
+      onComplete();
+    }
     return;
   }
 
   const t = nowMs();
 
   if (st.phase === "down") {
+    if (!hasTag(enemy, "attack"))
+      addTag(enemy, "attack", { by: "player", ts: Date.now() });
     const k = Math.min(1, (t - st.t0) / st.downMs);
     const y = lerp(st.startY, st.targetY, easeInOutQuad(k));
     setEnemyYOffset(enemy, y - st.startY);
-
     if (k < 1) {
       requestAnimationFrame(() => animTickDive(cfg, enemy, ctx));
       return;
@@ -317,20 +326,23 @@ function animTickDive(
 
     if (k < 1) {
       requestAnimationFrame(() => animTickDive(cfg, enemy, ctx, onComplete));
+      removeTag(enemy, "attack");
       return;
     }
 
     setEnemyYOffset(enemy, 0);
     (enemy as any).__outlineKick = 0;
     animByEnemy.delete(enemy);
+    removeTag(enemy, "attack");
     try {
       // removeTag должен быть доступен в скоупе (импортируй его, если в другом модуле)
-      removeTag(enemy, "attack");
     } catch (err) {
       console.error("[animTickDive] removeTag error:", err);
     }
     // Вызываем callback при завершении анимации
-    if (onComplete) onComplete();
+    if (onComplete) {
+      onComplete();
+    }
     return;
   }
 }
@@ -426,6 +438,7 @@ export function startEnemyDeath(
   // внутренние опции для retry — не обязательно передавать извне
   _opts?: { retryDelayMs?: number; maxRetries?: number; _attempt?: number }
 ) {
+  removeTag(enemy, "attack");
   const retryDelayMs = _opts?.retryDelayMs ?? 40;
   const maxRetries = _opts?.maxRetries ?? 50;
   const attempt = (_opts?._attempt ?? 0) + 1;
@@ -449,6 +462,7 @@ export function startEnemyDeath(
       maxRetries
     );
     if (attempt >= maxRetries) {
+      removeTag(enemy, "attack");
       console.warn(
         "[WARN] startEnemyDeath: max retries reached for",
         enemy.id,

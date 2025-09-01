@@ -1,5 +1,4 @@
-﻿// src/main.ts
-import p5 from "p5";
+﻿import p5 from "p5";
 import { drawHpStatus } from "./ui/hp_status";
 import {
   drawWeaponPanel,
@@ -67,10 +66,8 @@ import {
   drawEnemyImpacts,
 } from "./ui/attack";
 
-/* ---------- CONFIG / FLAGS ---------- */
 const DEBUG = true;
 
-/* ---------- HELPERS & CONSTANTS ---------- */
 const ELEMENT_COLOR: Record<ElementKey, string> = {
   earth: "#129447",
   fire: "#E53935",
@@ -95,17 +92,14 @@ function toElementKey(s: string | undefined): ElementKey {
   return ELEMENT_ALIAS[k] ?? "earth";
 }
 
-/* ---------- STATE ---------- */
 let cfg: Cfg | null = null;
 let selectedWeaponId = 1;
 let hitsLeft = 0;
 let playerHp = 0;
 let enemies: Enemy[] = [];
 
-/* ---------- DEFAULTS ---------- */
 const defaultElementMatrix: ElementMatrixCfg = DEFAULT_ELEMENT_MATRIX;
 
-/* ---------- CONFIG LOAD / RESET ---------- */
 async function loadConfig(url = "/config.json") {
   try {
     const r = await fetch(url, { cache: "no-store" });
@@ -170,7 +164,6 @@ function resetSession() {
   enemies = [];
   (cfg.player as any).onDamaged = (dmg: number) => {
     updateHud();
-    // можно также добавлять дополнительные визуальные эффекты тут
   };
 
   for (const m of cfg.minions || []) {
@@ -205,14 +198,12 @@ function resetSession() {
     lineOffset: cfg.boss.lineOffset ?? 0,
   });
 
-  // let layout module know about our enemies
   (cfg as any).__enemies = enemies;
 
   layoutEnemiesModule(cfg, enemies);
   updateHud();
 }
 
-/* ---------- HUD ---------- */
 function updateHud() {
   if (!cfg) return;
   const hpEl = document.getElementById("hp");
@@ -224,7 +215,6 @@ function updateHud() {
   if (we) we.textContent = `Оружие: ${selectedWeaponId}`;
 }
 
-/* ---------- DRAW HELPERS ---------- */
 function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   const isBoss = e.kind === "boss";
   const hpSize = isBoss ? 36 : 16;
@@ -247,40 +237,39 @@ function drawEnemyBadge(s: p5, e: Enemy, offset = 0) {
   s.text(String(e.hp), e.x, e.y + hpDy + offset);
   s.textSize(atkSize);
   s.text(String(e.atk), e.x, e.y + atkDy + offset);
+
+  // Пометка: если minion type 1 — рисуем красный кружок в углу
+  if (e.kind === "minion" && Number(e.type) === 1 && e.hp > 0) {
+    const r = e.r || e.radius || 16; // радиус кружка врага
+    const rx = e.x + r * 0.68; // смещение вправо (подбирается по вкусу)
+    const ry = e.y - r * 0.68 + offset; // смещение вверх (подбирается по вкусу)
+    s.push();
+    s.noStroke();
+    s.fill(255, 24, 24);
+    s.circle(rx, ry - 5, Math.max(7, r * 0.2)); // маленький круг
+    s.pop();
+  }
 }
 
-/* ---------- COMBAT: hit calculations (delegated to combat.ts) ---------- */
-
-// src/main.ts (вставить в верхнюю часть файла)
 const impactQueues = new Map<number, Promise<void>>();
 
 function enqueueImpact(id: number, fn: () => Promise<void> | void) {
   const prev = impactQueues.get(id) ?? Promise.resolve();
-  // создаём следующую задачу, цепляя в конец предыдущей
   const next = prev
     .then(() => Promise.resolve().then(() => fn()))
     .catch((err) => {
       console.error("[enqueueImpact] previous error", err);
-      // не прерываем цепочку — позволяем следующей выполниться
       return Promise.resolve().then(() => fn());
     });
 
   impactQueues.set(id, next);
 
-  // очистка карты когда задача завершится (только если это та же самая промис-ссылка)
   next.finally(() => {
     if (impactQueues.get(id) === next) impactQueues.delete(id);
   });
 
   return next;
 }
-
-/* computeSingleHit / applyDamage are imported from ./combat */
-
-/* ---------- orchestrateAtomicDeaths — imported from ./death.ts (Promise API) ---------- */
-
-/* ---------- performHit (consolidated) ---------- */
-// ---------------------- заменённый performHit ----------------------
 
 function performHit(
   player: PlayerCfg,
@@ -300,8 +289,6 @@ function performHit(
     elementMatrix ??
     (cfg?.elementMatrix as ElementMatrixCfg) ??
     defaultElementMatrix;
-  // deadList тут больше не используется для немедленного удаления/анимации:
-  // фактическое снятие HP будет происходить в момент визуального импакта.
 
   if (ability === "ab8") {
     const ORDER = opts.cycleOrder ?? ["earth", "fire", "water", "cosmos"];
@@ -320,10 +307,8 @@ function performHit(
     return { type: "ab8", from: fromEl, to: toEl, cost };
   }
 
-  // helper for single-target hits (point/ab0)
   const singleTargetHit = (el: ElementKey) => {
     const r = computeSingleHit(player, weapon, target, M, el);
-    // НЕ применять урон здесь — только посчитать и вернуть
     hitsLeft = Math.max(0, hitsLeft - 1);
     return { id: target.id, damage: r.finalDamage, didMiss: !!r.didMiss };
   };
@@ -331,7 +316,6 @@ function performHit(
   if (ability === "point") {
     const pointEl = opts.element ?? "none";
     const hitInfo = singleTargetHit(pointEl);
-    // не вызывать orchestrateAtomicDeaths здесь — делаем это при визуальном импакте
     return { type: "point", total: hitInfo.damage, hits: [hitInfo] };
   }
 
@@ -340,12 +324,10 @@ function performHit(
     return { type: "ab0", total: hitInfo.damage, hits: [hitInfo] };
   }
 
-  // ab5/6/7 multi-target
   if (ability === "ab5" || ability === "ab6" || ability === "ab7") {
     const superEl: ElementKey =
       ability === "ab5" ? "fire" : ability === "ab6" ? "earth" : "water";
     const hitsArr: { id: number; damage: number; didMiss: boolean }[] = [];
-    // first target (расчёт, без применения)
     const r1 = computeSingleHit(player, weapon, target, M, superEl);
     hitsArr.push({
       id: target.id,
@@ -353,7 +335,6 @@ function performHit(
       didMiss: !!r1.didMiss,
     });
 
-    // determine second target (как было)
     let second: Enemy | null = null;
     if (ability === "ab5") {
       const cand = enemies.filter((e) => e.id !== target.id && e.hp > 0);
@@ -391,24 +372,19 @@ function performHit(
       });
     }
 
-    // один расход хода на использование этой супер-абилки (как было)
     hitsLeft = Math.max(0, hitsLeft - 1);
     const total = hitsArr.reduce((s, x) => s + x.damage, 0);
     updateHud();
-
-    // НЕ вызывать orchestrateAtomicDeaths здесь — сделаем это при визуальном импакте
     return { type: ability, total, count: hitsArr.length, hits: hitsArr };
   }
 
   return { type: "skip", reason: "unknown_ability" };
 }
-// ---------------------- конец замены performHit ----------------------
 
-/* ---------- P5 scene ---------- */
 const selectedIcons: Record<number, p5.Image> = {};
 
 const sketch = (s: p5) => {
-  const W = 400,
+  const W = 370,
     H = 1400;
   let hoveredId: number | null = null;
 
@@ -424,7 +400,6 @@ const sketch = (s: p5) => {
     s.frameRate(60);
     preloadWeaponIcons(s);
     preloadAttackIcons(s);
-    //preloadAb0Glyph(s);
     preloadElementSchema(s);
     initGameLogger({ attachToSelector: "#canvas-wrap" });
   };
@@ -506,7 +481,6 @@ const sketch = (s: p5) => {
       { x: fieldX + 12, y: barY }
     );
 
-    //drawSelectedWeaponIcon(s, fieldX, weaponY);
     barY += 60;
 
     const rule = getSelectedWeaponCfg()?.retaliationRule ?? "t1";
@@ -551,6 +525,7 @@ const sketch = (s: p5) => {
   s.mouseMoved = () => {
     hoveredId = null;
     for (const e of enemies) {
+      if (hasTag(e, "attack")) return;
       const d = Math.hypot(s.mouseX - e.x, s.mouseY - e.y);
       if (d <= e.r) {
         hoveredId = e.id;
@@ -565,11 +540,19 @@ const sketch = (s: p5) => {
 
   s.touchStarted = () => {
     HandleMouseOrTouch();
-    return false;
   };
 
+  function getInputXY(s: p5) {
+    // Если есть touches (на тач-устройстве) — берем первую точку
+    if (s.touches && s.touches.length > 0) {
+      const touchesObj = s.touches[0] as { x: number; y: number };
+      return { x: touchesObj.x, y: touchesObj.y };
+    }
+    // Иначе — мышь
+    return { x: s.mouseX, y: s.mouseY };
+  }
+
   function HandleMouseOrTouch() {
-    // блокируем ввод, если у любого врага висит tag "attack"
     if (enemies.some((e) => hasTag(e, "attack"))) {
       if (DEBUG)
         console.log(
@@ -577,6 +560,18 @@ const sketch = (s: p5) => {
         );
       return;
     }
+    const { x, y } = getInputXY(s);
+
+    hoveredId = null;
+    for (const e of enemies) {
+      if (hasTag(e, "attack")) return;
+      const d = Math.hypot(x - e.x, y - e.y);
+      if (d <= e.r) {
+        hoveredId = e.id;
+        break;
+      }
+    }
+
     const pickedWeaponId = handleWeaponClick(s.mouseX, s.mouseY);
     if (pickedWeaponId !== null) {
       selectedWeaponId = pickedWeaponId;
@@ -628,7 +623,6 @@ const sketch = (s: p5) => {
       options.element = pointEl;
     } else abilityType = "ab0";
 
-    /* ---------- patched: schedule attack animations, spawn impacts, then retaliation ---------- */
     const result = performHit(
       cfg.player,
       weapon,
@@ -653,10 +647,9 @@ const sketch = (s: p5) => {
         },
       ];
       const ctx = { reason: "counter", totalDamage, hits: hitsArray };
+      if (!hasTag(enemy, "attack")) addTag(enemy, "attack");
       const rule = (weapon.retaliationRule as "t1" | "t2" | "t3") ?? "t1";
 
-      // locals to capture into closures safely
-      // --- patched scheduling: absolute delays for start, impact, finish ---
       if (cfg) {
         const cfgLocal = cfg;
         const widLocal = getSelectedWeapon()?.id ?? selectedWeaponId ?? 1;
@@ -676,9 +669,8 @@ const sketch = (s: p5) => {
         const abilityIconPosLocal =
           (window as any).__ability_glyph_pos ?? undefined;
 
-        // parameters for impact visuals
-        const DEFAULT_IMPACT_MS = 380; // длительность визуального импакта
-        const impactRunFraction = 0.85; // где в run-фазе считать момент удара (85% по-умолчанию)
+        const DEFAULT_IMPACT_MS = 380;
+        const impactRunFraction = 0.85;
 
         let maxFinish = 0;
         const now = Date.now();
@@ -687,19 +679,17 @@ const sketch = (s: p5) => {
           const targetEnemy = enemies.find((e) => e.id === h.id);
           if (!targetEnemy) return;
 
-          const targetCopy = { ...targetEnemy }; // shallow copy to avoid mutation issues
+          const targetCopy = { ...targetEnemy };
           const preMs = defaultPreMsForHit(h);
           const ms = weaponBaseMs[widLocal] ?? 480;
-          const startDelay = idx * gapMs; // relative to now
+          const startDelay = idx * gapMs;
 
-          // compute impact timing relative to start of this hit
           const impactOffsetRelative = Math.max(
             0,
             Math.round(preMs + ms * impactRunFraction)
           );
           const impactMs = DEFAULT_IMPACT_MS;
 
-          // absolute delays (ms from now)
           const absStart = startDelay;
           const absImpact = startDelay + impactOffsetRelative;
           const absFinish = absImpact + impactMs;
@@ -710,10 +700,9 @@ const sketch = (s: p5) => {
               opts.fromX = abilityIconPosLocal.x;
               opts.fromY = abilityIconPosLocal.y;
             }
-            addTag(targetEnemy, "attack", { by: "player", ts: Date.now() });
             startAttackAnimation(cfgLocal, targetCopy as any, widLocal, opts);
           }, absStart);
-          // schedule: start projectile animation at absStart
+
           setTimeout(() => {
             const ix = targetCopy.x ?? 0;
             const iy =
@@ -722,7 +711,6 @@ const sketch = (s: p5) => {
               (targetCopy.yOffset ?? 0);
             spawnEnemyImpact(ix, iy, targetCopy.element, impactMs);
 
-            // находим "реальный" объект в массиве enemies
             const realTarget = enemies.find((e) => e.id === targetCopy.id);
             if (!realTarget) {
               if (DEBUG)
@@ -733,14 +721,12 @@ const sketch = (s: p5) => {
               return;
             }
 
-            // Если промах — можно ранть лог и закончить
             if (h.didMiss || !(h.damage > 0)) {
               if (DEBUG)
                 console.log("[IMPACT] miss or zero damage for", realTarget.id);
               return;
             }
 
-            // enqueueImpact гарантирует, что импакты по этому id выполняются последовательно
             enqueueImpact(realTarget.id, async () => {
               try {
                 const { died, prevHp, nowHp } = applyDamage(
@@ -756,16 +742,12 @@ const sketch = (s: p5) => {
                     died,
                   });
 
-                // обновляем HUD после изменения HP
                 updateHud();
 
-                // если цель погибла — вызываем оркестратор смерти (возвращаем промис)
                 if (died) {
-                  // orchestrateAtomicDeaths может быть асинхронной — ждём её завершения
                   await orchestrateAtomicDeaths(cfgLocal, enemies, [
                     realTarget,
                   ]);
-                  // и повторно обновим HUD/лейаут если нужно
                   updateHud();
                 }
               } catch (err) {
@@ -776,17 +758,10 @@ const sketch = (s: p5) => {
             });
           }, absImpact);
 
-          // optional: per-target retaliation AFTER its impact (instead of single global retaliation)
-          // setTimeout(() => {
-          //   const ctxOne = { reason: "counter", totalDamage: h.damage ?? 0, hits: [h] };
-          //   queueEnemyRetaliationToHp(cfgLocal, targetCopy as any, enemies, ctxOne, rule);
-          // }, absImpact + 60);
-
           maxFinish = Math.max(maxFinish, absFinish);
         });
 
-        // schedule global retaliation AFTER all hits' impacts finished
-        const RET_BUFFER = 120; // safety buffer
+        const RET_BUFFER = 120;
         const ctxCopy = {
           ...ctx,
           hits: ctx.hits ? ctx.hits.map((hh: any) => ({ ...hh })) : ctx.hits,
@@ -798,8 +773,8 @@ const sketch = (s: p5) => {
             enemies,
             ctxCopy,
             rule,
+            abilityType,
             () => {
-              // Callback при завершении всех атак монстров
               console.log(
                 "Monster retaliation complete, player interaction unlocked"
               );
@@ -814,7 +789,6 @@ const sketch = (s: p5) => {
   }
 };
 
-/* ---------- small utils ---------- */
 function getSelectedWeaponCfg(): WeaponCfg | null {
   if (!cfg?.weapons) return null;
   return cfg.weapons.find((w) => w.id === selectedWeaponId) ?? null;
@@ -835,7 +809,6 @@ function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
   p.text(`${dbg.min} – ${dbg.max}`, x + 270, y + size / 2 - 8 + 55);
 }
 
-/* ---------- debug helper ---------- */
 let lastPlayerDebugLine = "";
 const ELEMENTS_4: ElementKey[] = ["earth", "fire", "water", "cosmos"];
 function DebugStatsPlayerDamage(
@@ -869,7 +842,6 @@ function DebugStatsPlayerDamage(
   return { min: pureMinSel, max: pureMaxSel };
 }
 
-/* ---------- start ---------- */
 (async () => {
   await loadConfig();
   new p5(sketch);

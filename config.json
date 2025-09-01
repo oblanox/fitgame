@@ -35,7 +35,7 @@
   "minions": [
     {
       "id": 1,
-      "type": 1,
+      "type": 2,
       "element": "earth",
       "hp": 55,
       "atk": 15,
@@ -46,7 +46,7 @@
     },
     {
       "id": 2,
-      "type": 1,
+      "type": 2,
       "element": "earth",
       "hp": 33,
       "atk": 13,
@@ -79,7 +79,7 @@
     },
     {
       "id": 5,
-      "type": 1,
+      "type": 2,
       "element": "cosmos",
       "hp": 14,
       "atk": 24,

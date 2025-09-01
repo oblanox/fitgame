@@ -1,6 +1,6 @@
 // ui/abilities.ts — ПАНЕЛЬ СУПЕРУДАРОВ (ab5..ab8) + кнопка удара (ab0)
 import p5 from "p5";
-import { ab0Glyph, preloadAb0Glyph } from "./glyphs/ab0";
+import { ab0Glyph } from "./glyphs/ab0";
 
 export type AbilityId = "ab5" | "ab6" | "ab7" | "ab8" | "ab0";
 export type WeaponRule = "t1" | "t2" | "t3";

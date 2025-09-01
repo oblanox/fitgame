@@ -76,11 +76,11 @@ export function drawPointAbilityPanel(
     // надпись внутри круга
     p.noStroke();
     p.textAlign(p.CENTER, p.CENTER);
-    p.textSize(Math.floor(size * 0.34));
+    p.textSize(Math.floor(size * 0.30));
 
     if (id === "off") {
       p.fill(0);
-      p.text("off", cx + size / 2, cy);
+      p.text("без\nстихий", cx + size / 2, cy);
     } else {
       const el = POINT_AB_TO_ELEMENT[id];
       const raw = playerElements[el];
