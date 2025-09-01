@@ -35,7 +35,9 @@ export function orchestrateAtomicDeaths(
       return;
     }
 
-    const uniq = Array.from(new Map(deadList.map((d) => [d.id, d])).values()) as Enemy[];
+    const uniq = Array.from(
+      new Map(deadList.map((d) => [d.id, d])).values()
+    ) as Enemy[];
     const total = uniq.length;
     let finished = 0;
     const deadIds = uniq.map((d) => d.id as number);

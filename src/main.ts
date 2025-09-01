@@ -56,6 +56,15 @@ import {
   PlayerCfg,
   WeaponCfg,
 } from "./types";
+import { preloadAb0Glyph } from "@ui/glyphs/ab0";
+import {
+  preloadAttackIcons,
+  drawAttackPre,
+  drawAttackRun,
+  startAttackAnimation,
+  spawnEnemyImpact,
+  drawEnemyImpacts,
+} from "./ui/attack_ab0";
 
 /* ---------- CONFIG / FLAGS ---------- */
 const DEBUG = true;
@@ -158,6 +167,10 @@ function resetSession() {
   playerHp = cfg.player.hp;
   hitsLeft = cfg.player.hits;
   enemies = [];
+  (cfg.player as any).onDamaged = (dmg: number) => {
+    updateHud();
+    // можно также добавлять дополнительные визуальные эффекты тут
+  };
 
   for (const m of cfg.minions || []) {
     enemies.push({
@@ -193,6 +206,7 @@ function resetSession() {
 
   // let layout module know about our enemies
   (cfg as any).__enemies = enemies;
+
   layoutEnemiesModule(cfg, enemies);
   updateHud();
 }
@@ -391,7 +405,8 @@ const sketch = (s: p5) => {
     c.parent("canvas-wrap");
     s.frameRate(60);
     preloadWeaponIcons(s);
-    preloadWeaponSelected(s);
+    preloadAttackIcons(s);
+    //preloadAb0Glyph(s);
     preloadElementSchema(s);
     initGameLogger({ attachToSelector: "#canvas-wrap" });
   };
@@ -429,6 +444,7 @@ const sketch = (s: p5) => {
       s.text(String(r), fieldX - 8, y);
     }
 
+    drawAttackPre(s);
     for (const e of enemies) {
       const ds = Number((e as any).__deadScale ?? 1);
       const da = Number((e as any).__deadAlpha ?? 1);
@@ -461,6 +477,8 @@ const sketch = (s: p5) => {
       hpMax: cfg.player.hpMax,
     });
     setHpBarY(barY);
+    drawAttackRun(s);
+    drawEnemyImpacts(s);
     drawHpImpactOverlay(s);
 
     barY += 60;
@@ -471,7 +489,7 @@ const sketch = (s: p5) => {
       { x: fieldX + 12, y: barY }
     );
 
-    drawSelectedWeaponIcon(s, fieldX, weaponY);
+    //drawSelectedWeaponIcon(s, fieldX, weaponY);
     barY += 60;
 
     const rule = getSelectedWeaponCfg()?.retaliationRule ?? "t1";
@@ -575,6 +593,7 @@ const sketch = (s: p5) => {
       options.element = pointEl;
     } else abilityType = "ab0";
 
+    /* ---------- patched: schedule attack animations, spawn impacts, then retaliation ---------- */
     const result = performHit(
       cfg.player,
       weapon,
@@ -592,11 +611,114 @@ const sketch = (s: p5) => {
     ) {
       const totalDamage = (result as any).total ?? 0;
       const hitsArray = (result as any).hits ?? [
-        { id: enemy.id, damage: (result as any).damage ?? totalDamage },
+        {
+          id: enemy.id,
+          damage: (result as any).damage ?? totalDamage,
+          didMiss: false,
+        },
       ];
       const ctx = { reason: "counter", totalDamage, hits: hitsArray };
       const rule = (weapon.retaliationRule as "t1" | "t2" | "t3") ?? "t1";
-      queueEnemyRetaliationToHp(cfg, enemy, enemies, ctx, rule);
+
+      // locals to capture into closures safely
+      // --- patched scheduling: absolute delays for start, impact, finish ---
+      if (!cfg) {
+        queueEnemyRetaliationToHp(cfg, enemy, enemies, ctx, rule);
+      } else {
+        const cfgLocal = cfg;
+        const widLocal = getSelectedWeapon()?.id ?? selectedWeaponId ?? 1;
+        const hitsLocal = Array.isArray((result as any).hits)
+          ? (result as any).hits.slice()
+          : [
+              {
+                id: enemy.id,
+                damage: (result as any).damage ?? totalDamage,
+                didMiss: false,
+              },
+            ];
+
+        const gapMs = 90;
+        const weaponBaseMs: Record<number, number> = { 1: 480, 2: 380, 3: 640 };
+        const defaultPreMsForHit = (h: any) => (h.didMiss ? 80 : 160);
+        const abilityIconPosLocal =
+          (window as any).__ability_glyph_pos ?? undefined;
+
+        // parameters for impact visuals
+        const DEFAULT_IMPACT_MS = 380; // длительность визуального импакта
+        const impactRunFraction = 0.85; // где в run-фазе считать момент удара (85% по-умолчанию)
+
+        let maxFinish = 0;
+        const now = Date.now();
+
+        hitsLocal.forEach((h: any, idx: number) => {
+          const targetEnemy = enemies.find((e) => e.id === h.id);
+          if (!targetEnemy) return;
+
+          const targetCopy = { ...targetEnemy }; // shallow copy to avoid mutation issues
+          const preMs = defaultPreMsForHit(h);
+          const ms = weaponBaseMs[widLocal] ?? 480;
+          const startDelay = idx * gapMs; // relative to now
+
+          // compute impact timing relative to start of this hit
+          const impactOffsetRelative = Math.max(
+            0,
+            Math.round(preMs + ms * impactRunFraction)
+          );
+          const impactMs = DEFAULT_IMPACT_MS;
+
+          // absolute delays (ms from now)
+          const absStart = startDelay;
+          const absImpact = startDelay + impactOffsetRelative;
+          const absFinish = absImpact + impactMs;
+
+          // schedule: start projectile animation at absStart
+          setTimeout(() => {
+            const opts: any = { preMs, ms };
+            if (abilityIconPosLocal) {
+              opts.fromX = abilityIconPosLocal.x;
+              opts.fromY = abilityIconPosLocal.y;
+            }
+            // optionally skip anim for misses:
+            // if (h.didMiss) return;
+            startAttackAnimation(cfgLocal, targetCopy as any, widLocal, opts);
+          }, absStart);
+
+          // schedule: spawn visual impact at absImpact
+          setTimeout(() => {
+            const ix = targetCopy.x ?? 0;
+            const iy =
+              (targetCopy.y ?? 0) +
+              (targetCopy.lineOffset ?? 0) +
+              (targetCopy.yOffset ?? 0);
+            spawnEnemyImpact(ix, iy, targetCopy.element, impactMs);
+            if (DEBUG)
+              console.log(
+                "[IMPACT] scheduled spawn for",
+                targetCopy.id,
+                "absDelay",
+                absImpact
+              );
+          }, absImpact);
+
+          // optional: per-target retaliation AFTER its impact (instead of single global retaliation)
+          // setTimeout(() => {
+          //   const ctxOne = { reason: "counter", totalDamage: h.damage ?? 0, hits: [h] };
+          //   queueEnemyRetaliationToHp(cfgLocal, targetCopy as any, enemies, ctxOne, rule);
+          // }, absImpact + 60);
+
+          maxFinish = Math.max(maxFinish, absFinish);
+        });
+
+        // schedule global retaliation AFTER all hits' impacts finished
+        const RET_BUFFER = 120; // safety buffer
+        const ctxCopy = {
+          ...ctx,
+          hits: ctx.hits ? ctx.hits.map((hh: any) => ({ ...hh })) : ctx.hits,
+        };
+        setTimeout(() => {
+          queueEnemyRetaliationToHp(cfgLocal, enemy, enemies, ctxCopy, rule);
+        }, Math.max(0, maxFinish + RET_BUFFER));
+      }
     }
 
     if (DEBUG) console.log("Результат удара:", result);

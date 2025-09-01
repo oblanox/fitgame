@@ -1,4 +1,4 @@
-import { Cfg, Enemy } from "./types";
+import { Cfg, Enemy, ElementKey } from "./types";
 
 /* ---------- анимация / эффекты для main.ts ---------- */
 
@@ -39,7 +39,7 @@ export function easeInOutQuad(t: number) {
   t = Math.max(0, Math.min(1, t));
   return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 }
-function easeOutBack(t: number) {
+export function easeOutBack(t: number) {
   t = Math.max(0, Math.min(1, t));
   const c1 = 1.70158,
     c3 = c1 + 1;
@@ -299,6 +299,9 @@ function animTickDive(
 }
 
 /** Когда во время хита надо уменьшить HP игрока — анимация вызывает это */
+// Вверху файла убедитесь, что импортирован ElementKey:
+// import { Cfg, Enemy, ElementKey } from "./types";
+
 function applyEnemyDamageToPlayer(
   cfg: Cfg,
   enemy: Enemy,
@@ -307,27 +310,66 @@ function applyEnemyDamageToPlayer(
   if (!cfg?.player) return;
 
   const rules: any = (cfg as any).rules ?? {};
-  const base = Number(enemy.atk ?? 6);
-  const isBoss = enemy.kind === "boss";
+  const base = Number((enemy as any).atk ?? 6);
+  const isBoss = (enemy as any).kind === "boss";
+
   const mul = isBoss
     ? Number(rules.bossRetaliationMul ?? 0.75)
     : Number(rules.retaliationMul ?? 0.5);
-  const reactive = ctx.totalDamage
-    ? Math.min(1.5, 0.3 + ctx.totalDamage / 100)
-    : 1;
 
-  let dmg = Math.max(1, Math.round(base * mul * reactive));
-  const def = Number((cfg.player as any).defense ?? cfg.player.def ?? 0);
+  // reactive: базовый минимум 1.0, растёт при большом totalDamage
+  const rawReactive =
+    ctx && typeof ctx.totalDamage === "number"
+      ? 0.3 + Number(ctx.totalDamage) / 100
+      : 1;
+  const reactive = Math.min(1.5, Math.max(1, rawReactive));
+
+  // сырой урон до учета стихии и защиты
+  let raw = base * mul * reactive;
+
+  // --- УЧЁТ СТИХИИ (без ошибки типов) ---
+  // гарантируем корректный ключ элемента
+  const elKey = ((enemy as any).element ?? "none") as ElementKey;
+
+  // player.elements может быть undefined или Partial<Record<ElementKey, number>>
+  const playerElMap: Partial<Record<ElementKey, number>> =
+    (cfg.player as any).elements ?? {};
+
+  // безопасно читаем процент сопротивления (если задано)
+  const elPct = Number(playerElMap[elKey] ?? 0); // 0..1 (или 0..100?) — зависит от конфигурации
+
+  // если в конфиге элементы заданы в процентах >1 (например 84 вместо 0.84),
+  // можно автоматически нормировать — но оставим как есть (должны передавать 0..1).
+  if (elPct > 1) {
+    // Защитный шаг: если вдруг в конфиге записаны проценты 84 (вместо 0.84),
+    // интерпретируем >1 как процент и конвертируем.
+    raw = raw * Math.max(0, 1 - elPct / 100);
+  } else {
+    raw = raw * Math.max(0, 1 - elPct);
+  }
+
+  // Округление и вычисление после защиты
+  let dmg = Math.round(raw);
+  const def = Number((cfg.player as any).defense ?? 0);
   dmg = Math.max(0, dmg - def);
 
-  const prev = Number(cfg.player.hp ?? 0);
-  cfg.player.hp = Math.max(0, prev - dmg);
+  // Минимальный урон после защиты (опция)
+  const minAfterDef = Number(rules.minRetaliationDmg ?? 0);
+  if (minAfterDef > 0 && raw > 0 && dmg <= 0) dmg = minAfterDef;
 
+  // Применяем к HP игрока
+  const prev = Number((cfg.player as any).hp ?? 0);
+  (cfg.player as any).hp = Math.max(0, prev - dmg);
+
+  // Callback для UI (если установлен)
   try {
-    cfg.player.onDamaged?.(dmg, enemy, ctx.reason);
-  } catch {}
+    (cfg.player as any).onDamaged?.(dmg, enemy, ctx.reason);
+  } catch (e) {}
+
   console.log(
-    `[retaliation→HP] enemy=${enemy.id ?? "?"} dmg=${dmg} reason=${ctx.reason}`
+    `[retaliation→HP] enemy=${(enemy as any).id ?? "?"} raw=${raw.toFixed(
+      2
+    )} def=${def} dmg=${dmg} reason=${ctx.reason}`
   );
 }
 

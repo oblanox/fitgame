@@ -7,7 +7,7 @@
     "anchor": "left",
     "padding": { "left": 40, "right": 40, "top": 40, "bottom": 120 },
     "lineInsetTop": 14,
-    "lineInsetBottom": 80,
+    "lineInsetBottom": 100,
     "lineThickness": 1,
     "lineStep": 68
   },
