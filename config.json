@@ -150,8 +150,12 @@
     }
   },
 
-  "timer": { "turns": 10, "regen": { "minionPct": 0.1, "bossPct": 0.1 } },
-
+  "timer": {
+    "turns": 10,
+    "turnMs": 900,
+    "maxTurnMs": 360000,
+    "regen": { "minionPct": 0.0, "bossPct": 0.0 }
+  },
   "rules": {
     "shiftMs": 360,
     "chainGapMs": 120,

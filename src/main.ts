@@ -1,5 +1,6 @@
 ﻿import p5 from "p5";
 import { drawHpStatus } from "./ui/hp_status";
+import { createCounter } from "./counter";
 import {
   drawWeaponPanel,
   handleWeaponClick,
@@ -159,49 +160,180 @@ function normalizeConfig() {
 
 function resetSession() {
   if (!cfg) return;
-  playerHp = cfg.player.hp;
-  hitsLeft = cfg.player.hits;
-  enemies = [];
-  (cfg.player as any).onDamaged = (dmg: number) => {
-    updateHud();
-  };
+  console.warn("[resetSession] called — stack trace:");
+  console.trace();
+  // защита от рекурсивных/параллельных reset'ов
+  if ((window as any).__isResetting) return;
+  (window as any).__isResetting = true;
 
-  for (const m of cfg.minions || []) {
+  try {
+    // Инициализация базовых значений (playerHp, hitsLeft) до создания таймера
+    playerHp = Number(
+      (cfg as any)?.player?.hp ?? (cfg as any)?.player?.hpMax ?? 0
+    );
+    hitsLeft = Number(
+      (cfg as any)?.player?.hits ??
+        (cfg as any)?.player?.maxHits ??
+        (cfg as any)?.timer?.turns ??
+        60
+    );
+
+    // Параметры таймера из конфига (совместимость: timer.turnMs -> rules.turnMs -> fallback)
+    const msPerTurnCfg = Number(
+      (cfg as any)?.timer?.turnMs ?? (cfg as any)?.rules?.turnMs ?? 10000
+    );
+    const decrementOnTurnCfg = Boolean(
+      (cfg as any)?.timer?.decrementOnTurn ?? false
+    );
+
+    // Остановим / уничтожим старый счётчик, если он есть — чтобы создать новый с актуальным cfg
+    try {
+      (window as any).__turnCounter?.stop?.();
+      (window as any).__turnCounter?.destroy?.();
+    } catch (e) {
+      // swallow
+    }
+    (window as any).__turnCounter = undefined;
+
+    // Создаём новый счётчик с колбэками
+    (window as any).__turnCounter = createCounter({
+      cfg,
+      getRemaining: () => hitsLeft,
+      setRemaining: (v: number) => {
+        hitsLeft = v;
+        updateHud();
+      },
+      msPerTurn: msPerTurnCfg,
+      tickIntervalMs: 200,
+      decrementOnTurn: decrementOnTurnCfg,
+      onTick: (
+        remaining: number,
+        elapsedInTurn: number,
+        elapsedTotal?: number
+      ) => {
+        const elapsedSafe =
+          typeof elapsedTotal === "number" && Number.isFinite(elapsedTotal)
+            ? elapsedTotal
+            : 0;
+        const totalMsLeft = Math.max(0, remaining * msPerTurnCfg - elapsedSafe);
+
+        (window as any).__timerMsLeft = Math.floor(totalMsLeft);
+        (window as any).__timerProgress = Math.min(
+          1,
+          Math.max(0, elapsedInTurn / msPerTurnCfg)
+        );
+      },
+      onTurn: (remaining: number) => {
+        // regen: по конфигу timer.regen (не воскресаем мёртвых, не превышаем max)
+        const regen = (cfg as any)?.timer?.regen ?? {};
+        const minionPct =
+          typeof regen.minionPct === "number" &&
+          Number.isFinite(regen.minionPct)
+            ? regen.minionPct
+            : 0;
+        const bossPct =
+          typeof regen.bossPct === "number" && Number.isFinite(regen.bossPct)
+            ? regen.bossPct
+            : 0;
+
+        let changed = false;
+        if ((minionPct > 0 || bossPct > 0) && Array.isArray(enemies)) {
+          for (const e of enemies) {
+            if (!e || typeof e.hp !== "number" || e.hp <= 0) continue; // не воскрешаем
+            const maxFromCfg =
+              e.kind === "boss"
+                ? (cfg as any)?.boss?.hp
+                : ((cfg as any)?.minions || []).find((m: any) => m.id === e.id)
+                    ?.hp;
+            const maxHp = Number((e as any).__maxHp ?? maxFromCfg ?? e.hp);
+            const pct = e.kind === "boss" ? bossPct : minionPct;
+            if (pct > 0 && maxHp > 0) {
+              const add = Math.ceil(maxHp * pct);
+              const newHp = Math.min(maxHp, (e.hp ?? 0) + add);
+              if (newHp !== e.hp) {
+                e.hp = newHp;
+                changed = true;
+              }
+            }
+          }
+          if (changed) updateHud();
+        }
+      },
+      onZero: () => {
+        // по ТЗ: при нуле (время или ходы) — перезапустить сессию
+        // безопасно, т.к. флаг __isResetting не позволит рекурсивный вход
+        try {
+          resetSession();
+        } catch (err) {
+          console.error("[TIMER:onZero] resetSession failed:", err);
+        }
+      },
+      autoStart: false, // стартнем после установки hitsLeft через reset()
+    });
+
+    // Сбросим и запустим таймер с текущим hitsLeft
+    try {
+      (window as any).__turnCounter?.reset?.(hitsLeft);
+      (window as any).__turnCounter?.start?.();
+    } catch (e) {
+      console.warn("[resetSession] turnCounter reset/start failed", e);
+    }
+
+    // Построим список врагов (миньоны + босс)
+    enemies = [];
+
+    for (const m of cfg.minions || []) {
+      enemies.push({
+        id: m.id,
+        kind: "minion",
+        type: m.type,
+        element: toElementKey(m.element as any),
+        hp: m.hp,
+        atk: m.atk,
+        row: m.row ?? 2,
+        col: m.col ?? 0.5,
+        x: 0,
+        y: 0,
+        r: m.radius ?? 30,
+        lineOffset: m.lineOffset ?? 0,
+      });
+    }
+
+    // Добавим босса
     enemies.push({
-      id: m.id,
-      kind: "minion",
-      type: m.type,
-      element: toElementKey(m.element as any),
-      hp: m.hp,
-      atk: m.atk,
-      row: m.row ?? 2,
-      col: m.col ?? 0.5,
+      id: 999,
+      kind: "boss",
+      type: (cfg.boss as any).type,
+      element: toElementKey(cfg.boss.element as any),
+      hp: cfg.boss.hp,
+      atk: cfg.boss.atk,
+      row: cfg.boss.row ?? 4,
+      col: cfg.boss.col ?? 0.5,
       x: 0,
       y: 0,
-      r: m.radius ?? 30,
-      lineOffset: m.lineOffset ?? 0,
+      r: cfg.boss.radius ?? 60,
+      lineOffset: cfg.boss.lineOffset ?? 0,
     });
+
+    // Сохраняем __maxHp для корректного регена
+    for (const e of enemies) {
+      if (!(e as any).__maxHp) {
+        (e as any).__maxHp =
+          e.hp ??
+          (e.kind === "boss" ? (cfg as any)?.boss?.hp : undefined) ??
+          e.hp;
+      }
+    }
+
+    // expose for other modules
+    (cfg as any).__enemies = enemies;
+
+    // расположение и HUD
+    layoutEnemiesModule(cfg, enemies);
+    updateHud();
+  } finally {
+    (window as any).__isResetting = false;
   }
-
-  enemies.push({
-    id: 999,
-    kind: "boss",
-    type: (cfg.boss as any).type,
-    element: toElementKey(cfg.boss.element as any),
-    hp: cfg.boss.hp,
-    atk: cfg.boss.atk,
-    row: cfg.boss.row ?? 4,
-    col: cfg.boss.col ?? 0.5,
-    x: 0,
-    y: 0,
-    r: cfg.boss.radius ?? 60,
-    lineOffset: cfg.boss.lineOffset ?? 0,
-  });
-
-  (cfg as any).__enemies = enemies;
-
-  layoutEnemiesModule(cfg, enemies);
-  updateHud();
 }
 
 function updateHud() {
@@ -459,6 +591,47 @@ const sketch = (s: p5) => {
       }
 
       drawEnemyBadge(s, e, getEnemyYOffset(e));
+
+      // --- draw boss timer overlay (insert inside the for (const e of enemies) loop) ---
+      if (e.kind === "boss") {
+        // читает значения, которые мы установили в onTick
+        const msLeft = (window as any).__timerMsLeft ?? 0;
+        const pct = (window as any).__timerProgress ?? 0;
+
+        // форматирование mm:ss (ceil seconds so it looks nicer)
+        function formatMs(ms: number) {
+          const secs = Math.max(0, Math.ceil(ms / 1000));
+          const mm = Math.floor(secs / 60);
+          const ss = secs % 60;
+          if (mm > 0) return `${mm} мин ${ss.toString().padStart(2, "0")} сек`;
+          return `${ss} сек`;
+        }
+
+        // позиционирование: над головой босса
+        const yOff = getEnemyYOffset(e); // уже используете эту функцию
+        const bubbleX = e.x;
+        const bubbleY = e.y - e.r + 40; // подстройте -20 если нужно выше/ниже
+
+        s.push();
+        s.translate(bubbleX, bubbleY);
+
+        // timer text
+        s.fill(10);
+        s.textAlign(s.CENTER, s.CENTER);
+        s.textSize(Math.max(10, Math.floor(e.r * 0.18)));
+        s.text(formatMs(msLeft), 0, 0);
+
+        // circular progress arc around bubble
+        const arcR = Math.max(12, e.r * 0.38);
+        const start = -Math.PI / 2;
+        const end = start + pct * Math.PI * 2;
+
+        s.noFill();
+        s.stroke(0, 130);
+        s.strokeWeight(3);
+
+        s.pop();
+      }
     }
 
     let barY = fieldH;
@@ -469,6 +642,7 @@ const sketch = (s: p5) => {
       hpMax: cfg.player.hpMax,
     });
     setHpBarY(barY);
+    drawSelectedWeaponIcon(s, fieldX, barY);
     drawAttackRun(s);
     drawEnemyImpacts(s);
     drawHpImpactOverlay(s);
@@ -798,15 +972,46 @@ function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
   const weapon =
     cfg.weapons.find((w) => w.id === selectedWeaponId) ?? cfg.weapons[0];
   if (!weapon) return;
+
+  // лёгкая анимация иконки
   const dy = Math.sin(p.frameCount / 10) * 1.5;
-  const img = (selectedIcons as any)[weapon.id] as p5.Image | undefined;
-  if (img) p.image(img, x + 260, y - 40 + dy, 64, 120);
+  //const img = (selectedIcons as any)[weapon.id] as p5.Image | undefined;
+  //if (img) p.image(img, x + 260, y - 40 + dy, 64, 120);
+
+  // какой элемент выбран (point ability)
   const selectedEl = getActiveElementFromPointAbility();
+
+  // используем существующую функцию для расчёта мин/макс урона
   const dbg = DebugStatsPlayerDamage(cfg!.player, selectedEl);
+
+  // отрисуем фон небольшой панели для текста (чтобы было читаемо)
+  p.push();
+  p.noStroke();
+  p.fill(255, 220); // слегка прозрачный белый фон
+  const panelW = 170;
+  const panelH = 56;
+  const panelX = x + 200;
+  const panelY = y + size / 2 - 8 + 20;
+  p.rect(panelX, panelY, panelW, panelH, 6);
+
+  // текст: атака
   p.fill(0);
   p.textSize(14);
   p.textAlign(p.LEFT, p.TOP);
-  p.text(`${dbg.min} – ${dbg.max}`, x + 270, y + size / 2 - 8 + 55);
+  p.text(`Атака: ${dbg.min} – ${dbg.max}`, panelX + 10, panelY + 6);
+
+  // защита (def) — берём из конфига игрока
+  const def = cfg?.player?.def ?? 0;
+  p.textSize(13);
+  p.text(`Защита: ${def}`, panelX + 10, panelY + 28);
+
+  // опционально — отображаем выбранную стихию рядом (маленькой серой)
+  p.fill(80);
+  p.textSize(11);
+  p.textAlign(p.RIGHT, p.TOP);
+  p.text(`${selectedEl}`, panelX + panelW - 8, panelY + 6);
+
+  p.pop();
 }
 
 let lastPlayerDebugLine = "";
@@ -855,6 +1060,11 @@ function DebugStatsPlayerDamage(
     const input = ev.target as HTMLInputElement;
     if (!input.files || !input.files[0]) return;
     input.files[0].text().then((txt) => {
+      // остановим / удалим старый счётчик — чтобы новый resetSession создал корректный
+      try {
+        (window as any).__turnCounter?.stop();
+        // (window as any).__turnCounter?.destroy?.();
+      } catch (e) {}
       cfg = JSON.parse(txt) as Cfg;
       normalizeConfig();
       resetSession();
