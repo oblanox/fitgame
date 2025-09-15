@@ -83,6 +83,37 @@ export type WeaponCfg = {
 
 export type ElementMatrixCfg = Record<ElementKey, Record<ElementKey, number>>;
 
+// --- TIMER types (cfg + runtime state) ---
+export type TimerRegenCfg = {
+  minionPct?: number;
+  bossPct?: number;
+};
+
+export type TimerCfg = {
+  // общее количество "ходов" (используется при ресете/инициализации)
+  turns?: number;
+  // миллисекунд на один ход
+  turnMs?: number;
+  // максимум ms на ход (защита/ограничение)
+  maxTurnMs?: number;
+  // при достижении конца хода — уменьшать число ходов (true/false)
+  decrementOnTurn?: boolean;
+  // реген через конфиг
+  regen?: TimerRegenCfg;
+};
+
+export type TimerState = {
+  // сколько ещё ходов осталось (integer)
+  remainingTurns?: number;
+  // миллисекунд осталось внутри текущего хода
+  msLeftInTurn?: number;
+  // прогресс внутри хода 0..1 (процент ПРОШЕДШЕГО времени)
+  turnProgress?: number;
+  // timestamp последнего тика (Date.now())
+  lastTickAt?: number;
+};
+
+// --- Cfg (добавлено поле timer?: TimerCfg) ---
 export type Cfg = {
   field?: FieldCfg;
   player: PlayerCfg;
@@ -90,6 +121,8 @@ export type Cfg = {
   minions: MinionCfg[];
   weapons: WeaponCfg[];
   elementMatrix?: ElementMatrixCfg;
+  // таймер игры / ходов
+  timer?: TimerCfg;
   // произвольные правила, которые использовала анимация
   rules?: GameRules;
 };

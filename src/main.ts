@@ -14,6 +14,7 @@ import {
   handlePointAbilityClick,
   getActiveElementFromPointAbility,
   setSelectedPointAbility,
+  getSelectedPointAbility,
 } from "./ui/elements";
 import { drawPanelBg } from "@ui/common";
 import { drawPlayerStats } from "./ui/player_stats";
@@ -32,6 +33,11 @@ import {
   drawHpImpactOverlay,
   getEnemyYOffset,
   queueEnemyRetaliationToHp,
+  triggerBossRegenSuck,
+  drawBossRegenOrbs,
+  triggerMinionRegenSuck,
+  drawFloatTexts,
+  spawnFloatText,
 } from "./animations";
 
 import {
@@ -41,6 +47,7 @@ import {
   addTag,
   removeTag,
   hasTag,
+  getBossDamageMultiplier,
 } from "./combat";
 import {
   layoutEnemies as layoutEnemiesModule,
@@ -165,25 +172,74 @@ function resetSession() {
   // защита от рекурсивных/параллельных reset'ов
   if ((window as any).__isResetting) return;
   (window as any).__isResetting = true;
-
+  try {
+    // если текущий selected === "off" (или неизвестен) — переключаем на ab1
+    if (typeof getSelectedPointAbility === "function") {
+      const cur = getSelectedPointAbility();
+      if (!cur || cur === "off") {
+        setSelectedPointAbility("ab1");
+        console.info(
+          "[resetSession] no point-ability selected — default -> ab1"
+        );
+      }
+    } else {
+      // на всякий случай — принудительно выставим ab1
+      setSelectedPointAbility("ab1");
+    }
+  } catch (e) {
+    // не критично — логируем, но не ломаем reset
+    console.warn("[resetSession] failed to ensure point ability selection", e);
+    try {
+      setSelectedPointAbility("ab1");
+    } catch (_) {}
+  }
   try {
     // Инициализация базовых значений (playerHp, hitsLeft) до создания таймера
+    // Инициализация базовых значений (playerHp) — hitsLeft рассчитываем ниже на основе timer-конфига
+
     playerHp = Number(
       (cfg as any)?.player?.hp ?? (cfg as any)?.player?.hpMax ?? 0
-    );
-    hitsLeft = Number(
-      (cfg as any)?.player?.hits ??
-        (cfg as any)?.player?.maxHits ??
-        (cfg as any)?.timer?.turns ??
-        60
     );
 
     // Параметры таймера из конфига (совместимость: timer.turnMs -> rules.turnMs -> fallback)
     const msPerTurnCfg = Number(
       (cfg as any)?.timer?.turnMs ?? (cfg as any)?.rules?.turnMs ?? 10000
     );
+    console.info(
+      "[TIMER] msPerTurnCfg:",
+      msPerTurnCfg,
+      "raw timer:",
+      (cfg as any)?.timer,
+      "rules:",
+      (cfg as any)?.rules
+    );
+
     const decrementOnTurnCfg = Boolean(
       (cfg as any)?.timer?.decrementOnTurn ?? false
+    );
+
+    // Рассчитываем количество ходов (hitsLeft) параметрически:
+    // Приоритет источников: player.hits -> player.maxHits -> timer.turns ->
+    // если задан timer.maxTurnMs и известен msPerTurnCfg — используем Math.floor(maxTurnMs/turnMs)
+    // иначе — fallback 60.
+    const cfgTurns =
+      typeof (cfg as any)?.timer?.turns === "number"
+        ? Number((cfg as any).timer.turns)
+        : undefined;
+    const cfgMaxTurnMs =
+      typeof (cfg as any)?.timer?.maxTurnMs === "number"
+        ? Number((cfg as any).timer.maxTurnMs)
+        : undefined;
+    const defaultTurns =
+      cfgTurns ??
+      (cfgMaxTurnMs && msPerTurnCfg
+        ? Math.max(1, Math.floor(cfgMaxTurnMs / msPerTurnCfg))
+        : 60);
+
+    hitsLeft = Number(
+      (cfg as any)?.player?.hits ??
+        (cfg as any)?.player?.maxHits ??
+        defaultTurns
     );
 
     // Остановим / уничтожим старый счётчик, если он есть — чтобы создать новый с актуальным cfg
@@ -215,13 +271,24 @@ function resetSession() {
           typeof elapsedTotal === "number" && Number.isFinite(elapsedTotal)
             ? elapsedTotal
             : 0;
+
+        // Общий матч-таймер пока не используем в UI (по ТЗ). Храним только остаток текущего хода.
         const totalMsLeft = Math.max(0, remaining * msPerTurnCfg - elapsedSafe);
 
-        (window as any).__timerMsLeft = Math.floor(totalMsLeft);
-        (window as any).__timerProgress = Math.min(
+        // оставшееся в текущем ходе (ms)
+        (window as any).__turnMsLeft = Math.max(
+          0,
+          Math.floor(msPerTurnCfg - elapsedInTurn)
+        );
+        // прогресс текущего хода (0..1)
+        (window as any).__turnProgress = Math.min(
           1,
           Math.max(0, elapsedInTurn / msPerTurnCfg)
         );
+
+        // для совместимости оставляем общий таймер (неиспользуемый в отрисовке)
+        (window as any).__timerMsLeft = Math.floor(totalMsLeft);
+        (window as any).__timerProgress = (window as any).__turnProgress;
       },
       onTurn: (remaining: number) => {
         // regen: по конфигу timer.regen (не воскресаем мёртвых, не превышаем max)
@@ -238,18 +305,50 @@ function resetSession() {
 
         let changed = false;
         if ((minionPct > 0 || bossPct > 0) && Array.isArray(enemies)) {
+          // внутри onTurn:
           for (const e of enemies) {
-            if (!e || typeof e.hp !== "number" || e.hp <= 0) continue; // не воскрешаем
+            if (!e || typeof e.hp !== "number" || e.hp <= 0) continue;
+
             const maxFromCfg =
               e.kind === "boss"
                 ? (cfg as any)?.boss?.hp
                 : ((cfg as any)?.minions || []).find((m: any) => m.id === e.id)
                     ?.hp;
+
             const maxHp = Number((e as any).__maxHp ?? maxFromCfg ?? e.hp);
             const pct = e.kind === "boss" ? bossPct : minionPct;
             if (pct > 0 && maxHp > 0) {
               const add = Math.ceil(maxHp * pct);
               const newHp = Math.min(maxHp, (e.hp ?? 0) + add);
+
+              // debug
+              console.log(
+                "[REGEN] target",
+                e.id,
+                e.kind,
+                "hp",
+                e.hp,
+                "->",
+                newHp,
+                "add",
+                add
+              );
+
+              if (e.kind === "boss") {
+                triggerBossRegenSuck(cfg as any, e, {
+                  count: 18,
+                  spreadRadius: 200,
+                  duration: 900,
+                  onComplete: () => {},
+                });
+              } else if (e.kind === "minion") {
+                triggerMinionRegenSuck(cfg as any, e, {
+                  count: 4 + Math.floor(Math.random() * 3),
+                  spreadRadius: 40,
+                  duration: 420 + Math.floor(Math.random() * 220),
+                });
+              }
+
               if (newHp !== e.hp) {
                 e.hp = newHp;
                 changed = true;
@@ -445,7 +544,12 @@ function performHit(
   const singleTargetHit = (el: ElementKey) => {
     const r = computeSingleHit(player, weapon, target, M, el);
     hitsLeft = Math.max(0, hitsLeft - 1);
-    return { id: target.id, damage: r.finalDamage, didMiss: !!r.didMiss };
+    return {
+      id: target.id,
+      damage: r.finalDamage,
+      didMiss: !!r.didMiss,
+      didCrit: !!r.didCrit,
+    };
   };
 
   if (ability === "point") {
@@ -453,6 +557,7 @@ function performHit(
     const pointEl =
       opts.element ?? getActiveElementFromPointAbility() ?? "earth";
     const hitInfo = singleTargetHit(pointEl);
+
     return { type: "point", total: hitInfo.damage, hits: [hitInfo] };
   }
 
@@ -523,6 +628,7 @@ function performHit(
 
     hitsLeft = Math.max(0, hitsLeft - 1);
     const total = hitsArr.reduce((s, x) => s + x.damage, 0);
+
     updateHud();
     return { type: ability, total, count: hitsArr.length, hits: hitsArr };
   }
@@ -602,14 +708,23 @@ const sketch = (s: p5) => {
       }
 
       drawEnemyBadge(s, e, getEnemyYOffset(e));
-
-      // --- draw boss timer overlay (insert inside the for (const e of enemies) loop) ---
+      drawBossRegenOrbs(s);
+      drawFloatTexts(s);
+      // --- draw boss turn-timer as an inner-edge arc + remaining turn time (inside boss) ---
       if (e.kind === "boss") {
-        // читает значения, которые мы установили в onTick
-        const msLeft = (window as any).__timerMsLeft ?? 0;
-        const pct = (window as any).__timerProgress ?? 0;
+        // Читаем прогресс/статус таймера, которое выставляется в resetSession -> createCounter.onTick
+        const pct = (window as any).__timerProgress ?? 0; // 0..1 — доля ПРОШЕДШЕГО времени хода
+        // берём ms на ход из конфига (фоллбек 10s)
+        const msPerTurn = Number(
+          cfg?.timer?.turnMs ?? (cfg as any)?.rules?.turnMs ?? 10_000
+        );
+        // ms оставшегося внутри текущего хода
+        const msRemainingInTurn = Math.max(
+          0,
+          Math.ceil((1 - Math.min(1, Math.max(0, pct))) * msPerTurn)
+        );
 
-        // форматирование mm:ss (ceil seconds so it looks nicer)
+        // форматирование mm:ss (округляем вверх по секундам для удобства)
         function formatMs(ms: number) {
           const secs = Math.max(0, Math.ceil(ms / 1000));
           const mm = Math.floor(secs / 60);
@@ -618,28 +733,36 @@ const sketch = (s: p5) => {
           return `${ss} сек`;
         }
 
-        // позиционирование: над головой босса
-        const yOff = getEnemyYOffset(e); // уже используете эту функцию
-        const bubbleX = e.x;
-        const bubbleY = e.y - e.r + 40; // подстройте -20 если нужно выше/ниже
-
+        // рисуем arc по внутреннему краю круга босса (центр — e.x, e.y + offset)
         s.push();
-        s.translate(bubbleX, bubbleY);
+        const yOff = getEnemyYOffset(e);
+        const cx = e.x;
+        const cy = e.y + yOff;
 
-        // timer text
-        s.fill(10);
-        s.textAlign(s.CENTER, s.CENTER);
-        s.textSize(Math.max(10, Math.floor(e.r * 0.18)));
-        s.text(formatMs(msLeft), 0, 0);
-
-        // circular progress arc around bubble
-        const arcR = Math.max(12, e.r * 0.38);
+        // arc: чуть внутрь от края круга босса
+        const inset = Math.max(6, Math.round(e.r * 0.06)); // можно подправить
+        const arcDia = Math.max(12, e.r * 2 - inset * 2);
         const start = -Math.PI / 2;
-        const end = start + pct * Math.PI * 2;
+        const end = start + Math.max(0, Math.min(1, pct)) * Math.PI * 2;
 
+        // тёмная тонкая подложка полного круга (фон) — чтобы было видно прогресс
         s.noFill();
-        s.stroke(0, 130);
-        s.strokeWeight(3);
+        s.stroke(0, 30);
+        s.strokeWeight(Math.max(3, Math.round(e.r * 0.06)));
+        s.arc(cx, cy, arcDia, arcDia, 0, Math.PI * 2);
+
+        // сам прогресс (цвет и толщина можно настроить)
+        s.noFill();
+        s.stroke(0, 180); // чёрный/полупрозрачный — как просили
+        s.strokeWeight(Math.max(4, Math.round(e.r * 0.08)));
+        s.arc(cx, cy, arcDia, arcDia, start, end);
+
+        // показываем оставшееся время хода в центре босса
+        s.noStroke();
+        s.fill(20); // белый текст — можно изменить
+        s.textAlign(s.CENTER, s.CENTER);
+        s.textSize(Math.max(12, Math.floor(e.r * 0.17)));
+        s.text(formatMs(msRemainingInTurn), cx, cy - 40);
 
         s.pop();
       }
@@ -922,6 +1045,11 @@ const sketch = (s: p5) => {
               return;
             }
 
+            let mul = 1;
+            if (enemy.kind === "boss") {
+              mul = getBossDamageMultiplier(cfgLocal, targetCopy);
+            }
+
             enqueueImpact(realTarget.id, async () => {
               try {
                 const { died, prevHp, nowHp } = applyDamage(
@@ -937,6 +1065,25 @@ const sketch = (s: p5) => {
                     died,
                   });
 
+                // --- SPAWN FLOAT TEXT тут ---
+                const dmg = Math.max(0, (prevHp ?? 0) - (nowHp ?? 0));
+                if (dmg > 0) {
+                  const isCrit = !!(h as any).didCrit;
+                  spawnFloatText(
+                    realTarget.x ?? 0,
+                    (realTarget.y ?? 0) +
+                      (realTarget.lineOffset ?? 0) +
+                      (realTarget.yOffset ?? 0) -
+                      10,
+                    -dmg,
+                    {
+                      element: getActiveElementFromPointAbility(),
+                      crit: isCrit,
+                      size: 30,
+                    }
+                  );
+                }
+
                 updateHud();
 
                 if (died) {
@@ -948,8 +1095,6 @@ const sketch = (s: p5) => {
               } catch (err) {
                 console.error("[IMPACT] error applying damage:", err);
               }
-            }).catch((err) => {
-              console.error("[enqueueImpact] unexpected error", err);
             });
           }, absImpact);
 
@@ -1134,3 +1279,6 @@ function DebugStatsPlayerDamage(
     });
   });
 })();
+function pointAbilityIdToElement(selectedPointAbility: any): any {
+  throw new Error("Function not implemented.");
+}

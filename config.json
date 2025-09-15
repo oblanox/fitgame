@@ -18,7 +18,7 @@
     "hits": 60,
     "def": 8,
     "attack": { "min": 12, "max": 16 },
-    "luck": 8,
+    "luck": 110,
     "elements": { "earth": 0.84, "fire": 0.44, "water": 0.31, "cosmos": 0.17 }
   },
 
@@ -151,10 +151,11 @@
   },
 
   "timer": {
-    "turns": 10,
-    "turnMs": 900,
+    "turns": 20000,
+    "turnMs": 10000,
     "maxTurnMs": 360000,
-    "regen": { "minionPct": 0.0, "bossPct": 0.0 }
+    "regen": { "minionPct": 0.1, "bossPct": 0.5 },
+    "decrementOnTurn": false
   },
   "rules": {
     "shiftMs": 360,

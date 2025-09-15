@@ -6,11 +6,9 @@ import {
   WeaponCfg,
   Enemy,
   getTags,
-  TagsMap
-  
+  TagsMap,
+  Cfg,
 } from "./types";
-
-
 
 let _isPlayerLock = false;
 
@@ -21,9 +19,6 @@ export function setPlayerLock(v: boolean) {
 export function getIsPlayerLock(): boolean {
   return _isPlayerLock;
 }
-
-
-
 
 // ----------------- конец Turn flags -----------------
 
@@ -131,7 +126,7 @@ export function applyDamage(
   }
 
   // нормализуем dmg
-  const damage = Number.isFinite(dmg) ? Math.max(0, Math.floor(dmg)) : 0;
+  let damage = Number.isFinite(dmg) ? Math.max(0, Math.floor(dmg)) : 0;
 
   // применяем урон (не допускаем отрицательного HP)
   target.hp = Math.max(0, prev - damage);
@@ -170,7 +165,11 @@ export function removeTag(enemy: Enemy, tag: string) {
     } else {
       tags[tag] = next;
     }
-  } else if (typeof v === "object" && v !== null && typeof v.count === "number") {
+  } else if (
+    typeof v === "object" &&
+    v !== null &&
+    typeof v.count === "number"
+  ) {
     v.count -= 1;
     if (v.count <= 0) {
       delete tags[tag];
@@ -205,4 +204,34 @@ export function clearTag(enemy: Enemy, tag: string) {
   delete tags[tag];
   delete tags[`${tag}_meta`];
   if (Object.keys(tags).length === 0) delete enemy.__tags;
+}
+
+export function getBossDamageMultiplier(cfg: Cfg, boss: Enemy): number {
+  const type = boss?.type ?? 1;
+  const pos = boss?.row ?? 4;
+  const minions = (cfg.minions ?? []).filter((m) => m.hp > 0);
+  const minionCount = minions.length;
+
+  switch (type) {
+    case 1: {
+      const tLeft = (cfg as any).__turnsLeft ?? 10;
+      const maxTurns = (cfg as any)?.timer?.turns ?? 10;
+      const ratio = Math.max(
+        0.1,
+        Math.min(3.0, 3 - ((maxTurns - tLeft) / maxTurns) * 2.9)
+      );
+      return ratio; // от 3.0 до 0.1
+    }
+    case 2:
+      if (pos === 4) return 4.0;
+      if (pos === 3) return 3.0;
+      if (pos === 2) return 2.0;
+      return 1.0;
+    case 3: {
+      const multiplier = Math.max(0.1, minionCount * 1.0); // 0.1..5.0
+      return multiplier;
+    }
+    default:
+      return 1.0;
+  }
 }

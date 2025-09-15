@@ -32,7 +32,7 @@ function nowMs() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
-// локальный easing (если у вас нет общего модуля)
+// локальный easing 
 function easeOutBackLocal(t: number) {
   const c1 = 1.70158;
   const c3 = c1 + 1;

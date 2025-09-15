@@ -30,6 +30,395 @@ const hpImpacts: HpImpact[] = [];
 let hpBarY = 0;
 let hpBarSet = false;
 
+// --- вставить в верх файла (уже импортированы Cfg, Enemy, ElementKey) ---
+type RegenOrb = {
+  id: number;
+  startX: number;
+  startY: number;
+  tx: number;
+  ty: number;
+  size: number;
+  t0: number; // global start timestamp
+  delay: number; // ms before movement starts
+  dur: number; // ms travel duration
+  element: ElementKey | string;
+  alpha: number;
+  ripple: boolean; // сделать вспышку при попадании
+};
+
+const regenOrbs: RegenOrb[] = [];
+let nextRegenOrbId = 1;
+
+// ---- Float text: элементный цвет + чёрная окантовка + крит = красная внутренняя окантовка ----
+type FloatText = {
+  id: number;
+  x: number;
+  y: number;
+  t0: number;
+  ms: number;
+  amount: number | "miss";
+  element?: ElementKey; // "earth" | "fire" | ...
+  colorHex?: string; // fallback if element not provided
+  crit?: boolean;
+  size0: number;
+  rise: number;
+};
+
+let nextFloatTextId = 1;
+const floatTexts: FloatText[] = [];
+
+function hexToRgb(hex: string) {
+  const h = (hex || "#FFFFFF").replace("#", "");
+  const hx =
+    h.length === 3
+      ? h
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : h;
+  const v = parseInt(hx, 16);
+  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
+}
+
+/**
+ * spawnFloatText(x, y, amount, opts)
+ * amount: number (например -34) или строка "miss" (покажем ПРОМАХ)
+ * opts:
+ *   element?: ElementKey  -- предпочтительный источник цвета
+ *   colorHex?: string     -- fallback цвет в hex
+ *   crit?: boolean
+ *   ms?: number
+ *   size?: number
+ *   rise?: number
+ */
+export function spawnFloatText(
+  x: number,
+  y: number,
+  amount: number | "miss",
+  opts: {
+    element?: ElementKey;
+    colorHex?: string;
+    crit?: boolean;
+    ms?: number;
+    size?: number;
+    rise?: number;
+  } = {}
+) {
+  const ms = opts.ms ?? (opts.crit ? 1100 : 900);
+  const size0 = opts.size ?? (opts.crit ? 42 : 66);
+  const rise = opts.rise ?? (opts.crit ? 56 : 46);
+  const el = opts.element;
+  floatTexts.push({
+    id: nextFloatTextId++,
+    x,
+    y,
+    t0: nowMs(),
+    ms,
+    amount,
+    element: el,
+    colorHex: opts.colorHex,
+    crit: !!opts.crit,
+    size0,
+    rise,
+  });
+}
+
+/** Вызывать в draw loop: drawFloatTexts(p) */
+export function drawFloatTexts(p: any /* p5 */) {
+  if (!floatTexts.length) return;
+  const t = nowMs();
+
+  for (let i = floatTexts.length - 1; i >= 0; --i) {
+    const f = floatTexts[i];
+    const dt = t - f.t0;
+    const k = Math.max(0, Math.min(1, dt / Math.max(1, f.ms)));
+    const ek = easeOutCubic(k);
+    const alpha = Math.round(255 * Math.max(0, 1 - k)); // 255..0
+
+    // position + slight bob
+    const x = f.x + Math.sin((t + f.id * 37) / 260) * 4 * (1 - ek);
+    const y =
+      f.y - f.rise * ek - Math.sin((t + f.id * 97) / 180) * 6 * (1 - ek);
+
+    // size
+    const size = f.size0 * (1 + (1 - ek) * 0.08);
+
+    // text
+    const text =
+      f.amount === "miss" ? "ПРОМАХ" : String(Math.round(f.amount as number)); // округляем
+
+    // color from element or fallback
+    const elemRgb = elementColorRGB(f.element ?? (f as any).colorHex);
+    // if explicit colorHex passed, override:
+    const colorHex = (f as any).colorHex;
+    const mainRgb = colorHex ? hexToRgb(colorHex) : elemRgb;
+
+    p.push();
+    p.textAlign(p.CENTER, p.CENTER);
+    p.textSize(size);
+
+    if (!f.crit) {
+      // 1) Outer black outline (thick) - всегда присутствует
+      p.stroke(0, Math.floor(230 * (alpha / 255)));
+      p.strokeWeight(Math.max(2, Math.round(size * 0.08)));
+      p.fill(mainRgb.r, mainRgb.g, mainRgb.b, Math.floor(230 * (alpha / 255)));
+      p.text(text, x, y);
+    } else {
+      // 2) If crit: inner red outline (thinner) to make critical pop
+      p.stroke(229, 57, 53, Math.floor(220 * (alpha / 255))); // red
+      p.strokeWeight(Math.max(1, Math.round(size * 0.21)));
+      p.textSize(size * 1.5);
+      // draw again (keeps same fill)
+      p.text(text, x, y);
+      // optionally add a tiny white-ish top highlight:
+      p.noStroke();
+      p.fill(255, Math.floor(60 * (alpha / 255)));
+      p.text(text, x, y - Math.max(1, size * 0.03));
+    }
+
+    p.pop();
+
+    if (k >= 1) floatTexts.splice(i, 1);
+  }
+}
+
+// Мини-версия регена для миньона — обёртка над triggerBossRegenSuck
+export function triggerMinionRegenSuck(
+  cfg: Cfg,
+  minion: Enemy,
+  opts: {
+    count?: number;
+    spreadRadius?: number;
+    duration?: number;
+    maxSize?: number;
+    minSize?: number;
+    onComplete?: () => void;
+  } = {}
+) {
+  // значения по-умолчанию — меньше, чем у босса
+  const defaults = {
+    count: 6, // меньше кружков
+    spreadRadius: 60, // плотнее вокруг миньона
+    duration: 520, // быстрее летят
+    maxSize: 6,
+    minSize: 2,
+  };
+
+  const merged = {
+    count: opts.count ?? defaults.count,
+    spreadRadius: opts.spreadRadius ?? defaults.spreadRadius,
+    duration: opts.duration ?? defaults.duration,
+    maxSize: opts.maxSize ?? defaults.maxSize,
+    minSize: opts.minSize ?? defaults.minSize,
+    onComplete: opts.onComplete,
+  };
+
+  // просто вызываем общий триггер с меньшими параметрами
+  return triggerBossRegenSuck(cfg, minion, merged);
+}
+
+// helper palette (копия/вариант из attack.ts / ab0.ts)
+function elementColorRGB(el: string) {
+  const map: Record<string, string> = {
+    earth: "#129447",
+    fire: "#E53935",
+    water: "#1E88E5",
+    cosmos: "#8E24AA",
+    none: "#CCCCCC",
+  };
+  const hex = map[el] ?? "#FFFFFF";
+  const h = hex.replace("#", "");
+  const hx =
+    h.length === 3
+      ? h
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : h;
+  const v = parseInt(hx, 16);
+  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
+}
+
+// easing (small util)
+function easeOutCubic(t: number) {
+  t = Math.max(0, Math.min(1, t));
+  return 1 - Math.pow(1 - t, 3);
+}
+
+// public: вызвать, когда начинается реген босса (конец хода)
+// opts:
+//  - count: число орбов (целое)
+//  - spreadRadius: радиус начального разброса вокруг босса (px)
+//  - duration: время каждого шарика в мс (движение)
+//  - maxSize/minSize: размеры пикселей
+//  - onComplete: callback когда ВСЕ орбы дошли
+export function triggerBossRegenSuck(
+  cfg: Cfg,
+  boss: Enemy,
+  opts: {
+    count?: number;
+    spreadRadius?: number;
+    duration?: number;
+    maxSize?: number;
+    minSize?: number;
+    onComplete?: () => void;
+  } = {}
+) {
+  if (!boss || !cfg) {
+    if (opts.onComplete) opts.onComplete();
+    return;
+  }
+
+  const count = Math.max(6, Math.floor(opts.count ?? 16));
+  const spreadRadius = opts.spreadRadius ?? 200;
+  const duration = opts.duration ?? 900;
+  const maxSize = opts.maxSize ?? 12;
+  const minSize = opts.minSize ?? 4;
+  const el = (boss as any).element ?? "none";
+
+  const now = nowMs();
+  const created: number[] = [];
+
+  for (let i = 0; i < count; i++) {
+    // angle + radial jitter (start point around boss)
+    const ang = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.8;
+    const r = spreadRadius * (0.3 + Math.random() * 0.9);
+    const sx = (boss.x ?? 0) + Math.cos(ang) * r + (Math.random() - 0.5) * 24;
+    const sy = (boss.y ?? 0) + Math.sin(ang) * r + (Math.random() - 0.5) * 18;
+
+    const orb: RegenOrb = {
+      id: nextRegenOrbId++,
+      startX: sx,
+      startY: sy,
+      tx: boss.x ?? 0,
+      ty: (boss.y ?? 0) + (boss.lineOffset ?? 0),
+      size: Math.round(minSize + Math.random() * (maxSize - minSize)),
+      t0: now,
+      delay: Math.round(Math.random() * 220), // staggered start
+      dur: duration + Math.round(Math.random() * 240) - 120,
+      element: el,
+      alpha: 0.0,
+      ripple: Math.random() < 0.22, // часть даст вспышку при попадании
+    };
+    regenOrbs.push(orb);
+    created.push(orb.id);
+  }
+
+  // when all finished -> call onComplete (poll by timeout)
+  const timeout =
+    Math.max(
+      ...regenOrbs
+        .filter((o) => created.includes(o.id))
+        .map((o) => o.delay + o.dur)
+    ) + 120;
+  setTimeout(() => {
+    if (opts.onComplete) opts.onComplete();
+  }, timeout);
+
+  return created;
+}
+
+export function drawBossRegenOrbs(p: any /* p5 */) {
+  if (!regenOrbs.length) return;
+  const t = nowMs();
+
+  for (let i = regenOrbs.length - 1; i >= 0; --i) {
+    const o = regenOrbs[i];
+    const localT = t - o.t0 - o.delay;
+    if (localT < 0) {
+      // появление — маленький фэйд in
+      const inK = Math.max(0, 1 + localT / 180);
+      const col = elementColorRGB(String(o.element));
+      p.push();
+      p.noStroke();
+      p.fill(col.r, col.g, col.b, Math.floor(200 * inK * 0.6));
+      p.circle(o.startX, o.startY, o.size * 0.5);
+      p.pop();
+      continue;
+    }
+
+    const k = Math.min(1, localT / Math.max(1, o.dur));
+    const ek = easeOutCubic(k);
+
+    // нелинейная траектория (кривая Безье)
+    const cx =
+      o.startX +
+      (o.tx - o.startX) * 0.5 +
+      Math.sin((o.id + t / 500) * 0.7) * 18;
+    const cy = o.startY + (o.ty - o.startY) * 0.5 - 36 * (1 - ek);
+    const ix =
+      (1 - ek) * (1 - ek) * o.startX + 2 * (1 - ek) * ek * cx + ek * ek * o.tx;
+    const iy =
+      (1 - ek) * (1 - ek) * o.startY + 2 * (1 - ek) * ek * cy + ek * ek * o.ty;
+
+    const col = elementColorRGB(String(o.element));
+    // основной альфа (для свечения)
+    const glowAlpha = Math.max(0.06, (1 - k) * 0.9 + 0.1);
+
+    // Параметры окантовки (можно подправить при вызове triggerBossRegenSuck)
+    const outlineBaseAlpha = 0.6; // максимальная непрозрачность обводки (0..1)
+    const outlineWidthFactor = 0.18; // доля от размера → толщина stroke
+
+    // уменьшение окантовки по мере подхода (чтобы не давило на центр)
+    const outlineFade = Math.pow(1 - ek, 0.9); // 1 -> на старте, 0 -> в конце
+    const outlineAlpha = Math.floor(255 * outlineBaseAlpha * outlineFade);
+
+    // TRAIL / GLOW (слой под окантовкой)
+    p.push();
+    p.noStroke();
+    p.fill(col.r, col.g, col.b, Math.floor(120 * glowAlpha));
+    p.circle(ix, iy, Math.max(2, o.size * (1 + (1 - ek) * 1.2)));
+    p.fill(col.r, col.g, col.b, Math.floor(220 * glowAlpha));
+    p.circle(ix, iy, Math.max(1, o.size * (0.8 + ek * 0.6)));
+    p.pop();
+
+    // faint pull-line
+    p.push();
+    p.stroke(col.r, col.g, col.b, Math.floor(80 * (1 - ek)));
+    p.strokeWeight(1);
+    p.line(ix, iy, o.tx, o.ty);
+    p.pop();
+
+    // ---- ЧЁРНАЯ ПОЛУПРОЗРАЧНАЯ ОКАНТОВКА ----
+    // нарисуем тонкую внешнюю обводку: сначала слегка прозрачный внешний круг (чтобы окантовка выглядела мягкой),
+    // затем более плотную центральную обводку.
+    const outlineW = Math.max(
+      1,
+      o.size * outlineWidthFactor * (0.6 + outlineFade * 0.8)
+    ); // толщина в px
+
+    p.push();
+    // внешний мягкий контур (больший радиус, более прозрачный)
+    p.stroke(0, Math.floor(outlineAlpha * 0.55)); // 55% от основной
+    p.strokeWeight(Math.max(1, outlineW * 1.6));
+    p.noFill();
+    p.circle(ix, iy, Math.max(2, o.size * (1.2 + (1 - ek) * 0.6)));
+
+    // более явная тонкая обводка по краю (чётче)
+    p.stroke(0, outlineAlpha);
+    p.strokeWeight(Math.max(1, outlineW));
+    p.noFill();
+    p.circle(ix, iy, Math.max(2, o.size * (0.9 + ek * 0.6)));
+    p.pop();
+    // ----------------------------------------
+
+    // при достижении цели — вспышка / ripple
+    if (k >= 1) {
+      if (o.ripple) {
+        hpImpacts.push({
+          x: o.tx,
+          y: o.ty,
+          r0: 6,
+          r1: 30 + Math.random() * 24,
+          t0: t,
+          ms: 260 + Math.random() * 240,
+        });
+      }
+      regenOrbs.splice(i, 1);
+    }
+  }
+}
+
 export function nowMs() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
@@ -165,8 +554,9 @@ export function queueEnemyRetaliationToHp(
         candidates = [target];
     }
 
-    // boss direct-hit special-case
-    if (target.kind === "boss" && directHit) {
+    const isDirectBossHit = target.kind === "boss" && abilityType === "point";
+
+    if (isDirectBossHit) {
       const allMinions = all.filter((e) => e.kind === "minion" && e.hp > 0);
       const allRespond = [...allMinions];
       if (target.hp > 0) allRespond.push(target);
