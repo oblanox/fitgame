@@ -423,19 +423,22 @@ function performHit(
     defaultElementMatrix;
 
   if (ability === "ab8") {
-    const ORDER = opts.cycleOrder ?? ["earth", "fire", "water", "cosmos"];
+    // Смена стихии -> выбираем случайную из базовых (earth, fire, water, cosmos).
+    // Если явно передали opts.element (и это не "none") — используем её.
+    const ALL_EL: ElementKey[] = ["earth", "fire", "water", "cosmos"];
     const fromEl = target.element;
     let toEl: ElementKey;
-    if (opts.element && opts.element !== "none") toEl = opts.element;
-    else {
-      const idx = ORDER.indexOf(fromEl);
-      const nextIdx = (idx >= 0 ? idx + 1 : 0) % ORDER.length;
-      toEl = ORDER[nextIdx] as ElementKey;
-    }
+
+    // Выбираем случайную стихию, отличную от текущей.
+    const choices = ALL_EL.filter((e) => e !== fromEl);
+    toEl = choices[Math.floor(Math.random() * choices.length)];
+
+    // Применяем новую стихию и списываем стоимость
     target.element = toEl;
     const cost = opts.ab8Cost ?? 2;
     hitsLeft = Math.max(0, hitsLeft - cost);
     updateHud();
+
     return { type: "ab8", from: fromEl, to: toEl, cost };
   }
 
@@ -446,19 +449,33 @@ function performHit(
   };
 
   if (ability === "point") {
-    const pointEl = opts.element ?? "none";
+    // всегда используем выбранную точечную стихию, или дефолтную (earth)
+    const pointEl =
+      opts.element ?? getActiveElementFromPointAbility() ?? "earth";
     const hitInfo = singleTargetHit(pointEl);
     return { type: "point", total: hitInfo.damage, hits: [hitInfo] };
   }
 
   if (ability === "ab0") {
-    const hitInfo = singleTargetHit("none");
+    // ab0 теперь использует выбранную стихию (или opts.element, если передано)
+    const chosenEl =
+      opts.element ?? getActiveElementFromPointAbility() ?? "earth";
+    const hitInfo = singleTargetHit(chosenEl);
     return { type: "ab0", total: hitInfo.damage, hits: [hitInfo] };
   }
 
   if (ability === "ab5" || ability === "ab6" || ability === "ab7") {
-    const superEl: ElementKey =
-      ability === "ab5" ? "fire" : ability === "ab6" ? "earth" : "water";
+    // super удар использует выбранную стихию (из point панели) по умолчанию,
+    // если в opts.element явно не передана своя.
+    const defaultByAbility: Record<string, ElementKey> = {
+      ab5: "fire",
+      ab6: "earth",
+      ab7: "water",
+    };
+    const superEl: ElementKey = (opts.element ??
+      getActiveElementFromPointAbility() ??
+      defaultByAbility[ability]) as ElementKey;
+
     const hitsArr: { id: number; damage: number; didMiss: boolean }[] = [];
     const r1 = computeSingleHit(player, weapon, target, M, superEl);
     hitsArr.push({
@@ -519,12 +536,6 @@ const sketch = (s: p5) => {
   const W = 370,
     H = 1400;
   let hoveredId: number | null = null;
-
-  function preloadWeaponSelected(p: p5) {
-    selectedIcons[1] = p.loadImage("assets/icon_weapon_selected_1.png");
-    selectedIcons[2] = p.loadImage("assets/icon_weapon_selected_2.png");
-    selectedIcons[3] = p.loadImage("assets/icon_weapon_selected_3.png");
-  }
 
   s.setup = () => {
     const c = s.createCanvas(W, H);
@@ -659,11 +670,27 @@ const sketch = (s: p5) => {
 
     const rule = getSelectedWeaponCfg()?.retaliationRule ?? "t1";
     const selectedWeapon = getSelectedWeapon();
+
+    // обычная картинка (маленькая)
     const weaponImg = selectedWeapon
-      ? getWeaponIcon(selectedWeapon.kind) ?? undefined
+      ? getWeaponIcon(selectedWeapon.kind, false) ?? undefined
       : undefined;
 
-    drawAbilityPanel(s, fieldX, barY, fieldW, { rule, weaponImg });
+    // big-иконка для глифа (если есть)
+    const weaponImgBig = selectedWeapon
+      ? getWeaponIcon(selectedWeapon.kind, true) ?? undefined
+      : undefined;
+
+    // передаём map selectedIcons (у тебя есть локальная const selectedIcons = {} в main.ts)
+    // и id выбранного оружия (чтобы abilities мог делать fallback)
+    drawAbilityPanel(s, fieldX, barY, fieldW, {
+      rule,
+      weaponImg,
+      weaponImgBig, // опционально — если abilities знает про это поле
+      selectedIcons: selectedIcons, // map image -> передаём локальную переменную
+      selectedWeaponId: selectedWeapon?.id ?? selectedWeaponId,
+    });
+
     barY += 90;
 
     drawPointAbilityPanel(s, {
@@ -749,16 +776,9 @@ const sketch = (s: p5) => {
     const pickedWeaponId = handleWeaponClick(s.mouseX, s.mouseY);
     if (pickedWeaponId !== null) {
       selectedWeaponId = pickedWeaponId;
-      const rule = getSelectedWeaponCfg()?.retaliationRule ?? "t1";
-      const curSuper = getSelectedAbility();
-
-      if (
-        curSuper &&
-        curSuper !== "ab0" &&
-        !isSuperAbilityEnabled(rule as any, curSuper)
-      ) {
-        setSelectedAbility("ab0");
-      }
+      // УБРАНО: автоматическое переключение способностей при смене оружия.
+      // Оставляем только смену выбранного оружия — остальную логику будет
+      // обрабатывать внешний код / ты сам (как просил).
       return;
     }
 
@@ -770,7 +790,8 @@ const sketch = (s: p5) => {
 
     const pickedSuper = handleAbilityClick(s.mouseX, s.mouseY);
     if (pickedSuper) {
-      setSelectedPointAbility("off");
+      // УБРАНО: автоматический сброс/переключение точечной абилки при выборе супера.
+      // Теперь выбор супера не трогает point-панель.
       return;
     }
 
@@ -940,14 +961,56 @@ const sketch = (s: p5) => {
           ...ctx,
           hits: ctx.hits ? ctx.hits.map((hh: any) => ({ ...hh })) : ctx.hits,
         };
+
+        // --- BUILD list of retaliators (fixed)
+        const hitIds = Array.isArray(hitsLocal)
+          ? hitsLocal.map((h: any) => h.id)
+          : [];
+
+        // retaliatorIds: Set<number>
+        const retaliatorIds = new Set<number>();
+
+        // Define what counts as a direct (non-ability) hit.
+        // Assumption: "direct" = normal attack (ab0) or point ability ("point").
+        // If you prefer a different definition, change this condition.
+        const directHit = abilityType === "ab0" || abilityType === "point";
+
+        // If player clicked boss directly -> all ALIVE enemies retaliate (including boss)
+        if (enemy.kind === "boss" && directHit) {
+          for (const ev of enemies) {
+            if (ev.hp > 0) retaliatorIds.add(ev.id);
+          }
+        } else {
+          // 1) The first target (the one the player clicked) always retaliates (if alive)
+          if (enemy.hp > 0) retaliatorIds.add(enemy.id);
+
+          // 2) Any type===1 minion that received damage (even secondary) retaliates
+          for (const id of hitIds) {
+            const eHit = enemies.find((ee) => ee.id === id);
+            if (!eHit) continue;
+            if (
+              eHit.kind === "minion" &&
+              Number(eHit.type) === 1 &&
+              eHit.hp > 0
+            ) {
+              retaliatorIds.add(eHit.id);
+            }
+          }
+        }
+
+        // convert to array for passing (may be empty)
+        const retaliatorsArr = Array.from(retaliatorIds);
+
+        // Schedule retaliation AFTER all impacts/animations finished
         setTimeout(() => {
           queueEnemyRetaliationToHp(
             cfgLocal,
-            enemy,
+            enemy, // original clicked target
             enemies,
             ctxCopy,
             rule,
             abilityType,
+            retaliatorsArr, // <-- ПЕРЕДАЁМ явный список
             () => {
               console.log(
                 "Monster retaliation complete, player interaction unlocked"
@@ -974,9 +1037,9 @@ function drawSelectedWeaponIcon(p: p5, x: number, y: number, size = 64) {
   if (!weapon) return;
 
   // лёгкая анимация иконки
-  const dy = Math.sin(p.frameCount / 10) * 1.5;
-  //const img = (selectedIcons as any)[weapon.id] as p5.Image | undefined;
-  //if (img) p.image(img, x + 260, y - 40 + dy, 64, 120);
+  //  const dy = Math.sin(p.frameCount / 10) * 1.5;
+  //  const img = (selectedIcons as any)[weapon.id] as p5.Image | undefined;
+  //  if (img) p.image(img, x + 60, y - 40 + dy, 64, 120);
 
   // какой элемент выбран (point ability)
   const selectedEl = getActiveElementFromPointAbility();

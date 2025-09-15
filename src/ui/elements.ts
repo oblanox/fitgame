@@ -26,9 +26,9 @@ const COLOR: Record<ElementKey, string> = {
 };
 
 // Порядок отображения кнопок. OFF будет удаляться при debug=false
-const ORDER_ALL: PointAbilityId[] = ["ab1", "ab2", "ab3", "ab4", "off"];
+const ORDER_ALL: PointAbilityId[] = ["ab1", "ab2", "ab3", "ab4"];
 
-let selectedPointAbility: PointAbilityId = "ab1";
+let selectedPointAbility: PointAbilityId = "off";
 let hitboxes: { x: number; y: number; r: number; id: PointAbilityId }[] = [];
 
 export function drawPointAbilityPanel(
@@ -56,6 +56,7 @@ export function drawPointAbilityPanel(
     const cx = startX + idx * (size + gap);
     const isSel = id === selectedPointAbility;
 
+    // фон рамки
     p.noStroke();
     p.fill(255);
     p.rect(cx - 2, y - 2, size + 4, size + 4, 10);
@@ -65,7 +66,15 @@ export function drawPointAbilityPanel(
     p.fill(COLOR[el]);
     p.circle(cx + size / 2, cy, size);
 
-    // обводка выбора
+    // --- ВСЕГДА рисуем тонкую обводку вокруг круга для ab1..ab4 (и для off тоже) ---
+    // цвет обводки — цвет стихии; если none/white — используем чёрный чтобы был виден
+    p.noFill();
+    const outlineColor = el === "none" ? "#000" : COLOR[el];
+    p.stroke(outlineColor);
+    p.strokeWeight(2);
+    p.circle(cx + size / 2, cy, size - 2);
+
+    // обводка выделения (если выбран) — оставляем как раньше (оранжевая)
     if (isSel) {
       p.noFill();
       p.stroke("#ff9800");
@@ -76,13 +85,12 @@ export function drawPointAbilityPanel(
     // надпись внутри круга
     p.noStroke();
     p.textAlign(p.CENTER, p.CENTER);
-    p.textSize(Math.floor(size * 0.30));
+    p.textSize(Math.floor(size * 0.3));
 
     if (id === "off") {
       p.fill(0);
       p.text("без\nстихий", cx + size / 2, cy);
     } else {
-      const el = POINT_AB_TO_ELEMENT[id];
       const raw = playerElements[el];
       const val =
         typeof raw === "number" && Number.isFinite(raw)
@@ -106,6 +114,11 @@ export function handlePointAbilityClick(
   for (const h of hitboxes) {
     const d = Math.hypot(mx - h.x, my - h.y);
     if (d <= h.r) {
+      // Если нажали "off" — перенаправляем выбор на ab1 (пользовательский фоллбек).
+      if (h.id === "off") {
+        selectedPointAbility = "ab1";
+        return "ab1";
+      }
       selectedPointAbility = h.id;
       return h.id;
     }
@@ -121,8 +134,11 @@ export function setSelectedPointAbility(id: PointAbilityId) {
   selectedPointAbility = id;
 }
 
-// вернуть активную стихию для удара: ab1..ab4 → её стихия, off → "none"
 export function getActiveElementFromPointAbility(): ElementKey {
-  if (selectedPointAbility === "off") return "none";
+  // Treat "off" as default elemental selection (ab1 -> earth).
+  // Это гарантирует, что никогда не будет "none" в качестве активной стихии.
+  if (selectedPointAbility === "off") {
+    return POINT_AB_TO_ELEMENT["ab1"];
+  }
   return POINT_AB_TO_ELEMENT[selectedPointAbility];
 }

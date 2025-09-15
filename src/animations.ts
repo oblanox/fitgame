@@ -82,6 +82,7 @@ function setEnemyYOffset(e: Enemy, yOff: number) {
 }
 
 /** Очередь анимированных ответок от врагов (rule: t1/t2/t3) */
+// В animations.ts — замените/обновите определение функции на это.
 export function queueEnemyRetaliationToHp(
   cfg: Cfg,
   target: Enemy,
@@ -93,128 +94,204 @@ export function queueEnemyRetaliationToHp(
   },
   rule: "t1" | "t2" | "t3" = "t1",
   abilityType: string,
-  onComplete?: () => void // ← Добавляем callback для завершения
+  retaliatorIds?: number[] | null, // <- НОВЫЙ параметр
+  onComplete?: () => void
 ) {
-  if (!cfg?.player || !target || target.hp <= 0) return;
-
-  console.log("тип удара: " + abilityType);
-  // Блокируем взаимодействие игрока
-  if (typeof window !== "undefined") {
-    (window as any).__isPlayerInteractionBlocked = true;
+  // быстрое guard
+  if (!cfg?.player || !target || target.hp <= 0) {
+    if (typeof onComplete === "function") onComplete();
+    return;
   }
-  const row = Number(target.row ?? 1);
 
-  // candidates as before (rule t1/t2/t3 and boss special-case)
-  let candidates: Enemy[] = [];
-  // --- build candidates by rule ---
-  switch (rule) {
-    case "t1":
-      if (abilityType === "point" || abilityType === "ab0")
+  // блок взаимодействия игрока
+  (window as any).__isPlayerInteractionBlocked = true;
+
+  // Если нам передали явный список retaliatorIds — используем его как источник правды
+  let finalList: Enemy[] = [];
+  if (Array.isArray(retaliatorIds) && retaliatorIds.length > 0) {
+    const idSet = new Set(retaliatorIds);
+    finalList = all.filter((e) => idSet.has(e.id) && e.hp > 0);
+    // debug
+    if ((window as any).__DEBUG_RETAL) {
+      console.debug(
+        "[RETAL] using explicit retaliatorIds ->",
+        Array.from(idSet),
+        "final:",
+        finalList.map((x) => x.id)
+      );
+    }
+  } else {
+    // fallback: прежняя логика (с учётом ctx.hits / rule / abilityType)
+    // --- build hitsMap ---
+    const hitsMap = new Map<number, { damage: number; didMiss?: boolean }>();
+    if (Array.isArray(ctx.hits)) {
+      for (const h of ctx.hits)
+        hitsMap.set(h.id, { damage: h.damage ?? 0, didMiss: !!h.didMiss });
+    }
+
+    const row = Number(target.row ?? 1);
+    const directHit = abilityType === "ab0" || abilityType === "point";
+
+    // initial candidates by rule (preserve legacy behavior)
+    let candidates: Enemy[] = [];
+    switch (rule) {
+      case "t1":
+        if (abilityType === "point" || abilityType === "ab0")
+          candidates = all.filter(
+            (e) => e.kind === "minion" && Number(e.type) === 1 && e.hp > 0
+          );
+        else candidates = [target];
+        break;
+      case "t2": {
+        candidates = [target];
+        const sameRow = all
+          .filter(
+            (e) => e !== target && e.hp > 0 && Number(e.row ?? row) === row
+          )
+          .sort(
+            (a, b) =>
+              Math.hypot(a.x - target.x, a.y - target.y) -
+              Math.hypot(b.x - target.x, b.y - target.y)
+          );
+        if (sameRow[0]) candidates.push(sameRow[0]);
+        break;
+      }
+      case "t3":
         candidates = all.filter(
-          (e) => e.kind === "minion" && e.type === 1 && e.hp > 0
+          (e) => e.hp > 0 && Number(e.row ?? row) === row
         );
-      else candidates = [target];
-      break;
-    case "t2": {
-      // target + nearest alive in same row (if any)
-      candidates = [target];
-      const sameRow = all
-        .filter((e) => e !== target && e.hp > 0 && Number(e.row ?? row) === row)
-        .sort(
-          (a, b) =>
-            Math.hypot(a.x - target.x, a.y - target.y) -
-            Math.hypot(b.x - target.x, b.y - target.y)
-        );
-      if (sameRow[0]) candidates.push(sameRow[0]);
-      break;
+        break;
+      default:
+        candidates = [target];
     }
-    case "t3":
-      // all alive in same row
-      candidates = all.filter((e) => e.hp > 0 && Number(e.row ?? row) === row);
-      break;
-    default:
-      candidates = [target];
-  }
 
-  // boss special-case: if you attacked the boss, the spec says many/all minions may respond
-  if (target.kind === "boss") {
-    // decide: make all minions (alive) candidates
-    const allMinions = all.filter((e) => e.kind === "minion" && e.hp > 0);
-    if (allMinions.length > 0) candidates = allMinions;
-  }
-
-  // Build hits map for quick lookup
-  // --- include actual-hit targets into candidates (so hits outside rule still can retaliate) ---
-  if (Array.isArray(ctx.hits) && ctx.hits.length > 0) {
-    for (const h of ctx.hits) {
-      const eid = h.id;
-      const eobj = all.find((x) => x.id === eid);
-      if (eobj && eobj.hp > 0 && !candidates.includes(eobj)) {
-        candidates.push(eobj);
-      }
+    // boss direct-hit special-case
+    if (target.kind === "boss" && directHit) {
+      const allMinions = all.filter((e) => e.kind === "minion" && e.hp > 0);
+      const allRespond = [...allMinions];
+      if (target.hp > 0) allRespond.push(target);
+      candidates = allRespond;
     }
-  }
 
-  // build hitsMap for filtering
-  const hitsMap = new Map<number, { damage: number; didMiss?: boolean }>();
-  if (Array.isArray(ctx.hits)) {
-    for (const h of ctx.hits)
-      hitsMap.set(h.id, { damage: h.damage ?? 0, didMiss: !!h.didMiss });
-  }
+    // ensure primary target present
+    if (target.hp > 0 && !candidates.find((c) => c.id === target.id))
+      candidates.push(target);
 
-  // Пример строгой фильтрации пассивных: требуем факт попадания (didMiss=false) и damage>0
-  const filtered: Enemy[] = [];
-  const seen = new Set<number | string>();
-  for (const e of candidates) {
-    if (!e || e.hp <= 0) continue;
-    if (animByEnemy.get(e)) continue;
+    // final filtering according to types (conservative)
+    const filtered: Enemy[] = [];
+    const seen = new Set<number>();
+    for (const e of candidates) {
+      if (!e || e.hp <= 0) continue;
+      const eid = e.id;
+      if (seen.has(eid)) continue;
+      seen.add(eid);
 
-    const eid = e.id ?? `${e.kind}_${e.row}_${e.col}`;
-    if (seen.has(eid)) continue;
-    seen.add(eid);
-
-    if (e.kind === "minion") {
-      const mtype = Number(e.type ?? 1);
-      if (mtype === 1) {
-        // aggressive -> always respond (if in candidates)
-        filtered.push(e);
-      } else if (mtype === 2) {
-        // passive -> only if actually hit (strict)
-        const entry = hitsMap.get(e.id);
-        const didActuallyHit =
-          !!entry && entry.didMiss === false && (entry.damage ?? 0) > 0;
-        if (didActuallyHit) filtered.push(e);
+      if (e.kind === "minion") {
+        const mtype = Number(e.type ?? 1);
+        if (mtype === 1) {
+          // aggressive: if either hit or included by candidates -> respond
+          const wasHit = hitsMap.has(eid);
+          if (wasHit || candidates.includes(e)) filtered.push(e);
+        } else if (mtype === 2) {
+          // passive: only primary and actually hit
+          const entry = hitsMap.get(eid);
+          const wasPrimaryHit =
+            eid === target.id &&
+            !!entry &&
+            entry.didMiss === false &&
+            (entry.damage ?? 0) > 0;
+          if (wasPrimaryHit) filtered.push(e);
+        } else {
+          // other: require primary and hit
+          const entry = hitsMap.get(eid);
+          const wasPrimaryHit =
+            eid === target.id &&
+            !!entry &&
+            entry.didMiss === false &&
+            (entry.damage ?? 0) > 0;
+          if (wasPrimaryHit) filtered.push(e);
+        }
+      } else if (e.kind === "boss") {
+        if (e.id === target.id) {
+          const entry = hitsMap.get(e.id);
+          if (
+            directHit ||
+            (!!entry && entry.didMiss === false && (entry.damage ?? 0) > 0)
+          )
+            filtered.push(e);
+        }
       } else {
-        filtered.push(e);
+        const entry = hitsMap.get(e.id);
+        const wasPrimaryHit =
+          e.id === target.id &&
+          !!entry &&
+          entry.didMiss === false &&
+          (entry.damage ?? 0) > 0;
+        if (wasPrimaryHit) filtered.push(e);
       }
-    } else {
-      filtered.push(e);
+    }
+
+    // also ensure aggressive minions that were hit but not in candidates are included
+    if (Array.isArray(ctx.hits) && ctx.hits.length > 0) {
+      for (const h of ctx.hits) {
+        const eobj = all.find((x) => x.id === h.id);
+        if (!eobj || eobj.hp <= 0) continue;
+        const mtype = Number((eobj as any).type ?? 1);
+        if (mtype === 1 && !filtered.find((f) => f.id === eobj.id))
+          filtered.push(eobj);
+      }
+    }
+
+    // dedupe final
+    const dedup = new Map<number, Enemy>();
+    for (const e of filtered) dedup.set(e.id, e);
+    finalList = Array.from(dedup.values());
+
+    if ((window as any).__DEBUG_RETAL) {
+      console.debug(
+        "[RETAL] fallback finalList:",
+        finalList.map((x) => x.id),
+        "candidates:",
+        candidates.map((x) => x.id)
+      );
     }
   }
 
-  // schedule animations as before
-  // schedule animations as before
+  // schedule animations on finalList (unchanged behavior)
   const gap = cfg?.rules?.chainGapMs ?? 120;
-  const totalEnemies = filtered.length;
+  const totalEnemies = finalList.length;
   let completedEnemies = 0;
 
-  filtered.forEach((e, i) => {
+  for (const ev of all) {
+    if (!ev || ev.hp <= 0) continue;
+    if (ev.kind === "minion" && Number(ev.type) === 1) {
+      // add if not present already
+      if (!finalList.find((f) => f.id === ev.id)) finalList.push(ev);
+    }
+  }
+
+  finalList.forEach((e, i) => {
     setTimeout(() => {
+      // startEnemyDiveToHp — оставляем как есть
       startEnemyDiveToHp(cfg, e, ctx, () => {
-        // Callback при завершении атаки одного врага
         completedEnemies++;
-        if (completedEnemies >= totalEnemies && onComplete) {
+        if (
+          completedEnemies >= totalEnemies &&
+          typeof onComplete === "function"
+        ) {
+          (window as any).__isPlayerInteractionBlocked = false;
           onComplete();
         }
       });
     }, i * gap);
   });
 
-  // Если нет врагов для атаки, сразу вызываем завершение
-  if (filtered.length === 0 && onComplete) {
-    onComplete();
+  if (finalList.length === 0) {
+    (window as any).__isPlayerInteractionBlocked = false;
+    if (typeof onComplete === "function") onComplete();
   }
 }
+
 /** Начать анимацию удара данного врага в HP-бар игрока */
 function startEnemyDiveToHp(
   cfg: Cfg,

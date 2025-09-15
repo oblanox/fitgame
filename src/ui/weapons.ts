@@ -1,7 +1,13 @@
 import p5 from "p5";
 
 // Типы
-export type WeaponKind = "short" | "long" | "throw";
+export type WeaponKind =
+  | "short"
+  | "long"
+  | "throw"
+  | "short_big"
+  | "long_big"
+  | "throw_big";
 
 export type Weapon = {
   id: number;
@@ -19,7 +25,7 @@ let currentWeapons: Weapon[] = [];
 let hitboxes: { id: string; x: number; y: number; w: number; h: number }[] = [];
 
 // ===== Иконки =====
-const icons: Partial<Record<WeaponKind, p5.Image>> = {};
+export const icons: Record<string, p5.Image | undefined> = {};
 
 export function preloadWeaponIcons(p: p5) {
   try {
@@ -30,6 +36,15 @@ export function preloadWeaponIcons(p: p5) {
   } catch {}
   try {
     icons.throw = p.loadImage("assets/weapon_throw.png");
+  } catch {}
+  try {
+    icons.short_big = p.loadImage("assets/icon_weapon_selected_1.png");
+  } catch {}
+  try {
+    icons.long_big = p.loadImage("assets/icon_weapon_selected_2.png");
+  } catch {}
+  try {
+    icons.throw_big = p.loadImage("assets/icon_weapon_selected_3.png");
   } catch {}
 }
 
@@ -129,6 +144,7 @@ export function getWeapons(cfg: any): Weapon[] {
     const raw = (w?.kind ?? w?.type ?? w?.rangeType ?? "")
       .toString()
       .toLowerCase();
+
     if (
       raw.includes("throw") ||
       raw.includes("мет") ||
@@ -149,6 +165,23 @@ export function getWeapons(cfg: any): Weapon[] {
   }));
 }
 
-export function getWeaponIcon(kind: WeaponKind): p5.Image | null {
-  return icons[kind] ?? null;
+export function getWeaponIcon(
+  kind: any,
+  big: boolean = false
+): p5.Image | null {
+  // безопасная нормализация входа в строку
+  const baseKey = String(kind ?? "")
+    .toLowerCase()
+    .trim();
+
+  if (!baseKey) return null;
+
+  // пробуем сначала big-версию, затем обычную
+  if (big) {
+    const bigKey = `${baseKey}_big`;
+    if (icons[bigKey]) return icons[bigKey] ?? null;
+    return icons[baseKey] ?? null;
+  }
+
+  return icons[baseKey] ?? null;
 }

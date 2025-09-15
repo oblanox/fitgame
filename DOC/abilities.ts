@@ -54,11 +54,8 @@ const ABILITIES: Record<AbilityId, AbilityDef> = {
     title: "Отскок",
     hint: "Огонь: цель + ещё одна",
     glyph: (p, cx, cy, r, en) => {
-      const el = getActiveElementFromPointAbility();
-      const strokeColor =
-        el && el !== "none" && en ? ELEMENT_COLOR[el] : en ? "#000" : "#A0A0A0";
       p.noFill();
-      p.stroke(strokeColor);
+      p.stroke(en ? [229, 57, 53] : [160]);
       p.strokeWeight(3);
       p.arc(
         cx - r * 0.2,
@@ -78,10 +75,7 @@ const ABILITIES: Record<AbilityId, AbilityDef> = {
     title: "Разделение",
     hint: "Земля: цель + сосед на линии",
     glyph: (p, cx, cy, r, en) => {
-      const el = getActiveElementFromPointAbility();
-      const strokeColor =
-        el && el !== "none" && en ? ELEMENT_COLOR[el] : en ? "#000" : "#A0A0A0";
-      p.stroke(strokeColor);
+      p.stroke(en ? [26, 148, 71] : [160]);
       p.strokeWeight(3);
       p.line(cx - r * 0.45, cy, cx + r * 0.1, cy);
       p.line(cx + r * 0.1, cy, cx + r * 0.45, cy - r * 0.25);
@@ -94,10 +88,7 @@ const ABILITIES: Record<AbilityId, AbilityDef> = {
     title: "Проникновение",
     hint: "Вода: цель + след. позиция",
     glyph: (p, cx, cy, r, en) => {
-      const el = getActiveElementFromPointAbility();
-      const strokeColor =
-        el && el !== "none" && en ? ELEMENT_COLOR[el] : en ? "#000" : "#A0A0A0";
-      p.stroke(strokeColor);
+      p.stroke(en ? [30, 136, 229] : [160]);
       p.strokeWeight(3);
       p.line(cx - r * 0.5, cy, cx + r * 0.2, cy);
       p.line(cx + r * 0.2, cy, cx + r * 0.05, cy - r * 0.18);
@@ -113,10 +104,7 @@ const ABILITIES: Record<AbilityId, AbilityDef> = {
     hint: "Смена стихии цели (урон 0, −2 хода)",
     glyph: (p, cx, cy, r, en) => {
       p.noFill();
-      const el = getActiveElementFromPointAbility();
-      const strokeColor =
-        el && el !== "none" && en ? ELEMENT_COLOR[el] : en ? "#000" : "#A0A0A0";
-      p.stroke(0);
+      p.stroke(en ? 80 : 170);
       p.strokeWeight(3);
       p.arc(cx, cy, r * 1.1, r * 1.1, Math.PI * 0.15, Math.PI * 1.2);
       p.line(cx + r * 0.45, cy - r * 0.15, cx + r * 0.6, cy - r * 0.32);
@@ -126,33 +114,49 @@ const ABILITIES: Record<AbilityId, AbilityDef> = {
   },
   ab0: {
     id: "ab0",
-    title: "",
-    hint: "",
-    glyph: ab0Glyph,
-    /*
-    glyph: (p, cx, cy, r, en, weaponImg) => {
-      if (weaponImg) {
-        p.imageMode(p.CORNER);
-        p.image(weaponImg, cx - r * 0.8, cy - r * 0.8, r * 1.6, r * 1.6);
-      } else {
-        // fallback — диагональный удар
-        p.stroke(en ? [0] : [160]);
-        p.strokeWeight(3);
-        p.line(cx - r * 0.5, cy - r * 0.5, cx + r * 0.5, cy + r * 0.5);
-        p.line(cx - r * 0.3, cy + r * 0.4, cx, cy);
-        p.noStroke();
-      }
-        
-    },*/
+    title: "Удар",
+    hint: "Простой удар оружием",
+    // теперь glyph принимает обе картинки: weaponImgSmall, weaponImgBig
+    glyph: (
+      p,
+      cx,
+      cy,
+      r,
+      en,
+      weaponImgSmall?: p5.Image,
+      weaponImgBig?: p5.Image
+    ) => {
+      const W = Math.max(48, Math.round(r * 2.8)); // ширина панели
+      const H = Math.max(128, Math.round(r)); // высота панели
+      const x = Math.round(cx - W / 2);
+      const y = Math.round(cy - H / 1.5 ) - 20;
+
+      const el = (
+        typeof getActiveElementFromPointAbility === "function"
+          ? getActiveElementFromPointAbility()
+          : "earth"
+      ) as any;
+
+      // ПРИОРИТЕТ: weaponImgBig (если есть) → weaponImgSmall → undefined
+      const imgToDraw = weaponImgBig ?? weaponImgSmall ?? undefined;
+
+      drawAb0Adv(p, x, y, {
+        img: imgToDraw,
+        element: el,
+        w: W,
+        h: H,
+        animate: true,
+        label: undefined,
+      });
+    },
   },
 };
 
 // доступность суперударов по типу оружия (ab0 всегда доступен)
-// ab0 исключён из RULE_SUPERS — значит он всегда будет рисоваться как disabled
 const RULE_SUPERS: Record<WeaponRule, AbilityId[]> = {
-  t1: ["ab6", "ab8"],
-  t2: ["ab7", "ab8"],
-  t3: ["ab5", "ab8"],
+  t1: ["ab0", "ab6", "ab8"],
+  t2: ["ab0", "ab7", "ab8"],
+  t3: ["ab0", "ab5", "ab8"],
 };
 
 // состояние
@@ -178,14 +182,9 @@ export function drawAbilityPanel(
   const enabledList = new Set(RULE_SUPERS[data.rule] ?? []);
   if (data.selected !== undefined) selectedSuper = data.selected;
 
-  // УБРАНО: ранее код форсил переключение на "ab0" если тек. выбранная
-  // супер-абилка не поддерживается текущим оружием.
-  // Оставляем selection в покое — внешний код будет решать, что делать.
+  // 🔧 сбросить выбор, если текущая абилка не поддерживается оружием
   if (selectedSuper && !enabledList.has(selectedSuper)) {
-    // намеренно ничего не делаем — selection остаётся (или внешний код может очистить его).
-    // При желании можно раскомментировать следующую строку,
-    // чтобы вместо форсированного "ab0" делать сброс в null:
-    // selectedSuper = null;
+    selectedSuper = "ab0"; // ← переключаем на обычный удар
   }
 
   hits = [];
@@ -199,7 +198,7 @@ export function drawAbilityPanel(
   for (let i = 0; i < listAll.length; i++) {
     const id = listAll[i];
     const def = ABILITIES[id];
-    const enabled = enabledList.has(id) && id !== "ab0";
+    const enabled = enabledList.has(id);
 
     const cx = startX + i * (size + gap);
 
@@ -212,11 +211,9 @@ export function drawAbilityPanel(
 
     const sel = selectedSuper === id && enabled;
     if (sel) {
-      // Рисуем обводку единым цветом — цветом стихии для этой абилки.
-      // Если стихии нет (none/clear) — fallback на чёрный.
-
+      const el = ABILITY_TO_ELEMENT[id];
       p.noFill();
-      p.stroke("#ff9800");
+      p.stroke(ELEMENT_COLOR[el]);
       p.strokeWeight(3);
       p.circle(cx + size / 2, cy, size + 6);
     }
@@ -258,6 +255,10 @@ export function handleAbilityClick(mx: number, my: number): AbilityId | null {
     const d = Math.hypot(mx - h.x, my - h.y);
     if (d <= h.r) {
       if (!h.enabled) return null; // клик по потушенной — игнор
+      if (h.id === "ab0") {
+        selectedSuper = "ab0";
+        return "ab0";
+      }
       selectedSuper = h.id;
       return h.id;
     }
