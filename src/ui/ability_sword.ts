@@ -1,6 +1,6 @@
-// src/ui/ability_sword.ts
 import type p5 from "p5";
-import { easeOutBack } from "../animations"; // если нет — внизу есть локальная замена
+import { easeOutBack } from "../animations"; // если нет — внизу есть локальная, 
+// замена, пока оставим
 
 export type SwordButtonOptions = {
   id?: string | number; // идентификатор кнопки
@@ -123,7 +123,7 @@ export function drawSwordButton(s: p5, opts: SwordButtonOptions) {
     s.rect(x, y, w, h, 10);
   }
 
-  // compute center for sword drawing (upper portion of button)
+
   const cx = x + w / 2;
   const cy = y + h * 0.42; // a bit above center
 
@@ -145,7 +145,7 @@ export function drawSwordButton(s: p5, opts: SwordButtonOptions) {
     }
   }
 
-  // draw sword using simple vector shapes
+  // draw sword 
   s.push();
   s.translate(cx + advancePx, cy);
   s.rotate(angle);

@@ -151,19 +151,16 @@ export function layoutEnemies(cfg: Cfg, listEnemies?: Enemy[]) {
     // Apply adjusted centers to members (preserve their relative offsets)
     for (const p of placed) {
       let ty = tightestCenter + p.relOffset;
-      // clamp per-member to field vertical limits
       const minY = rect.fieldY + p.r;
       const maxY = rect.fieldY + rect.fieldH - p.r;
       ty = Math.max(minY, Math.min(maxY, ty));
       p.e.x = p.x;
       p.e.y = ty;
       targets.push({ id: p.e.id as number, x: p.x, y: ty });
-      // add to placedPrev for next rows (use final position)
       placedPrev.push({ x: p.x, y: ty, r: p.r });
     }
   }
 
-  // Add any enemies that weren't in rowsMap (safety)
   const existingIds = new Set(targets.map((t) => t.id));
   for (const e of arr) {
     if (!existingIds.has(e.id as number)) {
@@ -237,7 +234,7 @@ export function advanceFormationIfNeeded(enemiesRef: Enemy[], cfg: Cfg) {
   }
   if (alreadyCompact) return false;
 
-  // mapping oldRow -> newRow (1..n)
+  // mapping oldRow -> newRow (1..n) - под вопросом(?)
   const mapping = new Map<number, number>();
   rowsSet.forEach((r, idx) => mapping.set(r, idx + 1));
 

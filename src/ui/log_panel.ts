@@ -26,9 +26,7 @@ let userScrolled = false;
 
 /**
  * initGameLogger()
- * - creates the DOM log panel and hooks console.* by default
- * - options: attachToSelector (string) to insert panel into a specific parent (e.g. '#canvas-wrap')
- */
+  */
 export function initGameLogger(opts: { attachToSelector?: string } = {}) {
   if (!containerEl) createDomPanel(opts.attachToSelector);
 

@@ -170,8 +170,7 @@ export function drawAttackPre(p: p5) {
 }
 
 /* ---- run-phase only (projectiles / traces) ----
-   - call this AFTER drawing enemies to render projectiles above them
-   - it also removes finished attacks
+
 */
 export function drawAttackRun(p: p5) {
   const t = nowMs();
@@ -295,7 +294,7 @@ export function drawAttackRun(p: p5) {
   }
 }
 
-/* helper to draw an elemental splash (expanding circle under target) */
+/* helper рисует удар с замахом */
 function drawElementSplash(
   p: p5,
   x: number,
@@ -319,7 +318,7 @@ function drawElementSplash(
   p.pop();
 }
 
-/* elemental palette + helpers (same as before) */
+/* elemental palette + helpers - под вопросом переключение(наша палитра стихий) */
 function elementColor(el: string) {
   if (!el) el = "none";
   const map: Record<string, string> = {
